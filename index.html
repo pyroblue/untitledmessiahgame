@@ -65,6 +65,9 @@
   .mobile-hint {
     display: none;
   }
+  body.priest-intro .mobile-controls {
+    visibility: hidden;
+  }
   @media (hover: none) and (pointer: coarse) {
     .stage {
       --control-size: clamp(82px, 18vw, 112px);
@@ -216,6 +219,8 @@ const SPEED = 260;
 const BOOST_SPEED = 425;
 /** Duration of the sneaker reward callout. */
 const SPEED_FLASH_TIME = 1.8;
+/** Logical bounds of the High Priest introduction button. */
+const PRIEST_BUTTON = { x: 84, y: 430, w: 410, h: 58 };
 /** Keyboard flip range from the player, in pixels. */
 const KEY_RANGE = 78;
 /** Minimum distance between table anchors. */
@@ -248,6 +253,8 @@ const HEAD = 'Papyrus, fantasy';
 const NUM = '"Avenir Next", Avenir, "Trebuchet MS", sans-serif';
 /** Tablecloth colors. */
 const CLOTHS = ['#c4503c', '#e6d3b0', '#8d3a48', '#d08a3a'];
+/** Short protests shouted by displaced money-changers. */
+const MERCHANT_LINES = ['No!', 'My coins!', 'Hey!', 'Not again!', 'My table!', 'Mercy!', 'That was imported!', 'My livelihood!'];
 /** Vertical field of view, in radians. Wide enough to see the court past the shoulder. */
 const CAM_FOV = 0.78;
 /** How far behind the player the camera sits. */
@@ -323,9 +330,11 @@ const game = {
   sneaker: null,
   sneakerAwarded: false,
   speedFlash: 0,
+  priestIntro: null,
   player: null,
   tables: [],
   merchants: [],
+  giant: null,
   particles: [],
   bubbles: [],
   timeBursts: [],
@@ -770,7 +779,7 @@ function tickSteps(p) {
  * @returns {{x:number,y:number,yaw:number,bob:number,moving:boolean,swing:number}}
  */
 function makePlayer() {
-  return { x: 480, y: 460, yaw: Math.PI, bob: 0, moving: false, swing: 0 };
+  return { x: 480, y: 460, yaw: Math.PI, bob: 0, moving: false, swing: 0, grabbed: 0, heldHeight: 0, heldShake: 0 };
 }
 
 /**
@@ -893,6 +902,7 @@ function spawnWave(count) {
       y: spot.y,
       w: spot.w,
       flipped: false,
+      scored: false,
       anim: 0,
       fall: 1,
       rx: 0,
@@ -950,7 +960,10 @@ function startRun() {
   game.shake = 12;
   game.sneaker = null;
   game.sneakerAwarded = false;
+  game.giant = null;
   game.speedFlash = 0;
+  game.priestIntro = null;
+  document.body.classList.remove('priest-intro');
   game.player = makePlayer();
   setCourtSize(1);
   camYaw = game.player.yaw;
@@ -1018,6 +1031,15 @@ function setKey(code, down) {
 }
 
 /**
+ * Fade the High Priest introduction out and return to the player camera.
+ */
+function dismissPriestIntro() {
+  if (!game.priestIntro || game.priestIntro.exiting) return;
+  game.priestIntro.exiting = true;
+  resetJoystick();
+}
+
+/**
  * Movement keys, a one-shot flip, or starting a run.
  * @param {KeyboardEvent} e
  */
@@ -1027,6 +1049,10 @@ function onKeyDown(e) {
     e.preventDefault();
   }
   if (e.repeat) return;
+  if (game.priestIntro) {
+    if (code === 'Enter' || code === 'Space') dismissPriestIntro();
+    return;
+  }
   setKey(code, true);
   if (game.mode !== 'play') {
     if (code === 'Enter' || code === 'Space') startRun();
@@ -1050,10 +1076,19 @@ function onKeyUp(e) {
  * @param {PointerEvent} e
  */
 function onCanvasStart(e) {
-  if (game.mode === 'play') return;
   const rect = view.getBoundingClientRect();
   const x = ((e.clientX - rect.left) / (rect.width || W)) * W;
   const y = ((e.clientY - rect.top) / (rect.height || H)) * H;
+  if (game.priestIntro) {
+    const hit = x >= PRIEST_BUTTON.x && x <= PRIEST_BUTTON.x + PRIEST_BUTTON.w &&
+      y >= PRIEST_BUTTON.y && y <= PRIEST_BUTTON.y + PRIEST_BUTTON.h;
+    if (hit) {
+      if (e.cancelable) e.preventDefault();
+      dismissPriestIntro();
+    }
+    return;
+  }
+  if (game.mode === 'play') return;
   const titleHit = game.mode === 'title' && x >= 338 && x <= 622 && y >= 382 && y <= 434;
   const replayHit = game.mode === 'over' && x >= 358 && x <= 602 && y >= 300 && y <= 336;
   if (!titleHit && !replayHit) return;
@@ -1111,6 +1146,7 @@ function updateJoystick(e) {
  */
 function onJoystickDown(e) {
   e.preventDefault();
+  if (game.priestIntro) return;
   if (game.mode !== 'play') startRun();
   joystick.pointerId = e.pointerId;
   joystickElement.setPointerCapture(e.pointerId);
@@ -1123,6 +1159,10 @@ function onJoystickDown(e) {
  */
 function onMobileFlip(e) {
   e.preventDefault();
+  if (game.priestIntro) {
+    dismissPriestIntro();
+    return;
+  }
   if (game.mode !== 'play') {
     startRun();
     return;
@@ -1160,6 +1200,7 @@ function nearestUpright(x, y, range) {
 function tryFlipAt(x, y, range) {
   if (game.mode !== 'play') return false;
   if (game.banner > FLIP_LOCK) return false;
+  if (game.player.grabbed > 0) return false;
   const table = nearestUpright(x, y, range);
   if (!table) return false;
   flipTable(table);
@@ -1272,17 +1313,21 @@ function kickTable(table) {
 function flipTable(table) {
   const again = table.flipped;
   if (!again) {
+    const firstScore = !table.scored;
     table.flipped = true;
+    table.scored = true;
     table.anim = 0;
     table.fall = game.player.x <= table.x ? 1 : -1;
-    game.score += 1;
-    game.time += FLIP_TIME_BONUS;
-    game.timeBursts.push({
-      x: table.x,
-      y: table.y,
-      age: 0,
-      life: 1.15,
-    });
+    if (firstScore) {
+      game.score += 1;
+      game.time += FLIP_TIME_BONUS;
+      game.timeBursts.push({
+        x: table.x,
+        y: table.y,
+        age: 0,
+        life: 1.15,
+      });
+    }
   }
   kickTable(table);
   scarTable(table);
@@ -1307,6 +1352,7 @@ function flipTable(table) {
       y: speaker ? speaker.y : table.y,
       age: 0,
       life: 0.9,
+      text: MERCHANT_LINES[Math.floor(Math.random() * MERCHANT_LINES.length)],
     });
   }
   if (dist(game.player.x, game.player.y, table.x, table.y) <= KEY_RANGE + 36) {
@@ -1351,6 +1397,13 @@ function turnToward(current, target, dt, speed) {
  */
 function updatePlayer(dt) {
   const p = game.player;
+  if (p.grabbed > 0) {
+    p.walking = false;
+    p.moving = false;
+    p.gait = approach(p.gait || 0, 0, dt, 12);
+    if (p.swing > 0) p.swing = Math.max(0, p.swing - dt);
+    return;
+  }
   const turn = 3.6 * dt;
   const up = keys.up || mobileKeys.up;
   const down = keys.down || mobileKeys.down;
@@ -1723,6 +1776,147 @@ function fleeFromPlayer(merchant) {
 }
 
 /**
+ * Add or retire the black-clad table restorer for waves six through ten.
+ */
+function configureGiant() {
+  if (game.wave < 6 || game.wave > 10) {
+    if (game.player) {
+      game.player.grabbed = 0;
+      game.player.heldHeight = 0;
+      game.player.heldShake = 0;
+    }
+    game.giant = null;
+    return;
+  }
+  const arriving = !game.giant;
+  if (arriving) {
+    game.giant = {
+      x: FLOOR.l + 46,
+      y: FLOOR.b - 54,
+      yaw: 0,
+      phase: 0,
+      cooldown: 0,
+      grabTime: 0,
+      grabCooldown: 0,
+      tx: (FLOOR.l + FLOOR.r) / 2,
+      ty: (FLOOR.t + FLOOR.b) / 2,
+    };
+  }
+  game.giant.speed = 56 + (game.wave - 6) * 18;
+  game.giant.target = null;
+  game.giant.x = clamp(game.giant.x, FLOOR.l + 34, FLOOR.r - 34);
+  game.giant.y = clamp(game.giant.y, FLOOR.t + 44, FLOOR.b - 30);
+}
+
+/**
+ * Return a fallen table to its upright state without awarding it twice.
+ * @param {object} table
+ */
+function restoreTable(table) {
+  if (!table.flipped) return;
+  table.flipped = false;
+  table.anim = 0;
+  table.h = 0;
+  table.vh = 0;
+  table.rx = 0;
+  table.ry = 0;
+  table.rz = 0;
+  table.vrx = 0;
+  table.vry = 0;
+  table.vrz = 0;
+  game.shake = Math.max(game.shake, 5);
+  playSfx('land', { volume: 0.4, rate: 0.82 });
+}
+
+/**
+ * Lumber toward fallen tables, or patrol when there is nothing to restore.
+ * @param {number} dt
+ */
+function updateGiant(dt) {
+  const giant = game.giant;
+  if (!giant) return;
+  giant.cooldown = Math.max(0, giant.cooldown - dt);
+  giant.grabCooldown = Math.max(0, (giant.grabCooldown || 0) - dt);
+
+  if (giant.grabTime > 0) {
+    giant.grabTime = Math.max(0, giant.grabTime - dt);
+    const shake = Math.sin((5 - giant.grabTime) * 30);
+    game.player.grabbed = giant.grabTime;
+    game.player.heldHeight = 36 + Math.abs(shake) * 4;
+    game.player.heldShake = shake;
+    game.player.x = giant.x + Math.sin(giant.yaw) * 20;
+    game.player.y = giant.y + Math.cos(giant.yaw) * 20;
+    game.player.yaw = wrapAngle(giant.yaw + Math.PI);
+    giant.phase += dt * 5;
+    game.shake = Math.max(game.shake, 2.5);
+    if (giant.grabTime <= 0) {
+      game.player.grabbed = 0;
+      game.player.heldHeight = 0;
+      game.player.heldShake = 0;
+      game.player.x += Math.sin(giant.yaw) * 34;
+      game.player.y += Math.cos(giant.yaw) * 34;
+      giant.grabCooldown = 2;
+    }
+    return;
+  }
+
+  if (game.banner <= FLIP_LOCK && giant.grabCooldown <= 0 && dist(giant.x, giant.y, game.player.x, game.player.y) <= 46) {
+    giant.grabTime = 5;
+    game.player.grabbed = 5;
+    resetJoystick();
+    playSfx('shove', { volume: 0.55, rate: 0.78 });
+    return;
+  }
+
+  let target = null;
+  let targetDistance = Infinity;
+  for (const table of game.tables) {
+    if (!table.flipped || table.anim < FLIP_ANIM) continue;
+    const d = dist(giant.x, giant.y, table.x, table.y);
+    if (d < targetDistance) {
+      target = table;
+      targetDistance = d;
+    }
+  }
+
+  if (target) {
+    giant.target = target;
+    giant.tx = target.x;
+    giant.ty = target.y;
+  } else {
+    giant.target = null;
+    if (dist(giant.x, giant.y, giant.tx, giant.ty) < 18) {
+      giant.tx = rand(FLOOR.l + 48, FLOOR.r - 48);
+      giant.ty = rand(FLOOR.t + 52, FLOOR.b - 36);
+    }
+  }
+
+  const dx = giant.tx - giant.x;
+  const dy = giant.ty - giant.y;
+  const distance = Math.hypot(dx, dy);
+  const stop = target ? 48 : 10;
+  const moving = distance > stop;
+  if (moving) {
+    const nx = dx / distance;
+    const ny = dy / distance;
+    giant.x += nx * giant.speed * dt;
+    giant.y += ny * giant.speed * dt;
+    giant.yaw = turnToward(giant.yaw, Math.atan2(nx, ny), dt, 1.7);
+    giant.phase += dt * (2.1 + giant.speed / 34);
+  } else {
+    giant.phase += dt * 0.7;
+  }
+
+  giant.x = clamp(giant.x, FLOOR.l + 34, FLOOR.r - 34);
+  giant.y = clamp(giant.y, FLOOR.t + 44, FLOOR.b - 30);
+  if (target && targetDistance <= stop && giant.cooldown <= 0) {
+    restoreTable(target);
+    giant.target = null;
+    giant.cooldown = 1.25;
+  }
+}
+
+/**
  * Gravity for the short-lived coins and scrolls.
  * @param {number} dt
  */
@@ -1752,6 +1946,10 @@ function updateParticles(dt) {
 function updateBubbles(dt) {
   for (let i = game.bubbles.length - 1; i >= 0; i--) {
     const bubble = game.bubbles[i];
+    if (bubble.delay > 0) {
+      bubble.delay = Math.max(0, bubble.delay - dt);
+      continue;
+    }
     bubble.age += dt;
     if (bubble.merchant) {
       bubble.x = bubble.merchant.x;
@@ -1817,6 +2015,7 @@ function beginNextWave() {
   setCourtSize(game.wave);
   game.banner = BANNER_TIME;
   game.bannerSub = game.wave + (game.wave === 1 ? ' table' : ' tables');
+  if (game.wave === 6) game.bannerSub = 'THE RESTORER ARRIVES';
   game.shake = 14;
   if (game.wave === 6 && !game.sneakerAwarded) {
     game.sneaker = {
@@ -1828,6 +2027,13 @@ function beginNextWave() {
     game.sneakerAwarded = true;
   }
   spawnWave(game.wave);
+  configureGiant();
+  if (game.wave === 6) {
+    game.priestIntro = { mix: 0, exiting: false };
+    game.banner = 0;
+    document.body.classList.add('priest-intro');
+    resetJoystick();
+  }
   playSfx('wave', { volume: 0.55, rate: 0.92 });
 }
 
@@ -1846,9 +2052,18 @@ function update(dt) {
     if (game.shake > 0) game.shake = Math.max(0, game.shake - dt * 22);
     return;
   }
+  if (game.priestIntro) {
+    if (game.giant) game.giant.phase += dt * 1.2;
+    if (game.priestIntro.exiting && game.priestIntro.mix <= 0.001) {
+      game.priestIntro = null;
+      document.body.classList.remove('priest-intro');
+    }
+    return;
+  }
   updatePlayer(dt);
   updateSneakerPickup(dt);
   updateTables(dt);
+  updateGiant(dt);
   for (const merchant of game.merchants) updateMerchant(merchant, dt);
   updateParticles(dt);
   updateBubbles(dt);
@@ -2189,6 +2404,80 @@ function drawTitleScreen() {
   if (play.complete && play.naturalWidth) ctx.drawImage(play, cx - 101, buttonY + 15, 22, 22);
   label('START GAME', cx + 4, buttonY + 20, '700 14px ' + FONT, '#2a160e', 'center', 'middle');
   trackedLabel('ENTER · SPACE · CLICK', cx + 4, buttonY + 37, '700 8px ' + FONT, '#5a391c', 0.7);
+}
+
+/**
+ * Explain the Wave 6 threat beside its cinematic camera close-up.
+ */
+function drawPriestIntro() {
+  const intro = game.priestIntro;
+  if (!intro || intro.mix <= 0.001) return;
+  const alpha = clamp(intro.mix * 1.6, 0, 1);
+  const x = 38;
+  const y = 70;
+  const w = 500;
+  const h = 438;
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  const shade = ctx.createLinearGradient(0, 0, W, 0);
+  shade.addColorStop(0, 'rgba(12, 6, 5, 0.66)');
+  shade.addColorStop(0.62, 'rgba(12, 6, 5, 0.2)');
+  shade.addColorStop(1, 'rgba(12, 6, 5, 0)');
+  ctx.fillStyle = shade;
+  ctx.fillRect(0, 0, W, H);
+
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.72)';
+  ctx.shadowBlur = 28;
+  ctx.fillStyle = 'rgba(30, 16, 12, 0.96)';
+  roundRect(x, y, w, h, 22);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#d6a63d';
+  ctx.stroke();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(255, 239, 190, 0.48)';
+  roundRect(x + 9, y + 9, w - 18, h - 18, 15);
+  ctx.stroke();
+
+  trackedLabel('WAVE 6 · NEW THREAT', x + w / 2, y + 34, '700 11px ' + FONT, '#e2b44a', 1.5);
+  label('Angry Temple', x + 34, y + 66, '700 34px ' + NUM, '#fff8e8', 'left', 'top');
+  label('High Priest', x + 34, y + 103, '700 34px ' + NUM, '#fff8e8', 'left', 'top');
+  ctx.fillStyle = '#d6a63d';
+  ctx.fillRect(x + 34, y + 154, 104, 3);
+  label('He patrols the temple and puts fallen', x + 34, y + 180, '600 17px ' + FONT, '#f5e8d5', 'left', 'top');
+  label('tables back on their feet.', x + 34, y + 205, '600 17px ' + FONT, '#f5e8d5', 'left', 'top');
+  label('He gets faster every wave through Wave 10.', x + 34, y + 250, '600 16px ' + FONT, '#e4c987', 'left', 'top');
+  label('If he catches Jesus, he will lift and shake', x + 34, y + 282, '600 16px ' + FONT, '#e4c987', 'left', 'top');
+  label('him for five precious seconds.', x + 34, y + 306, '600 16px ' + FONT, '#e4c987', 'left', 'top');
+
+  ctx.fillStyle = '#fffaf3';
+  roundRect(648, 46, 276, 58, 14);
+  ctx.fill();
+  ctx.strokeStyle = '#2a1c14';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(784, 103);
+  ctx.lineTo(800, 126);
+  ctx.lineTo(814, 103);
+  ctx.closePath();
+  ctx.fill();
+  label("I'll put every table back.", 786, 75, '700 16px ' + FONT, '#2a1c14', 'center', 'middle');
+
+  const pulse = 0.5 + 0.5 * Math.abs(Math.sin(performance.now() / 430));
+  ctx.shadowColor = 'rgba(255, 211, 78, ' + (0.3 + pulse * 0.35) + ')';
+  ctx.shadowBlur = 10 + pulse * 10;
+  const buttonFill = ctx.createLinearGradient(0, PRIEST_BUTTON.y, 0, PRIEST_BUTTON.y + PRIEST_BUTTON.h);
+  buttonFill.addColorStop(0, '#f5d36e');
+  buttonFill.addColorStop(1, '#c9912d');
+  ctx.fillStyle = buttonFill;
+  roundRect(PRIEST_BUTTON.x, PRIEST_BUTTON.y, PRIEST_BUTTON.w, PRIEST_BUTTON.h, 28);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  label("LET'S GET BACK TO FLIPPIN'", PRIEST_BUTTON.x + PRIEST_BUTTON.w / 2, PRIEST_BUTTON.y + 29, '700 15px ' + FONT, '#2a160e', 'center', 'middle');
+  ctx.restore();
 }
 
 /**
@@ -2796,12 +3085,25 @@ function updateCamera() {
   const want = cameraRoomScale(camX + ox, camZ + oz, camX, camZ);
   const rate = want < camPull ? 9 : 3.2;
   camPull += (want - camPull) * (1 - Math.exp(-rate * dt));
-  const ex = camX + ox * camPull + Math.sin(k * 1.7) * shake;
-  const ez = camZ + oz * camPull + Math.cos(k * 1.3) * shake * 0.35;
-  const ey = GROUND + CAM_HEIGHT * (0.7 + 0.3 * camPull) + Math.cos(k * 2.1) * shake * 0.25;
-  const tx = camX + hx * CAM_AHEAD + sx * 14;
-  const ty = GROUND + CAM_LOOK_H;
-  const tz = camZ + hz * CAM_AHEAD + sz * 14;
+  let ex = camX + ox * camPull + Math.sin(k * 1.7) * shake;
+  let ez = camZ + oz * camPull + Math.cos(k * 1.3) * shake * 0.35;
+  let ey = GROUND + CAM_HEIGHT * (0.7 + 0.3 * camPull) + Math.cos(k * 2.1) * shake * 0.25;
+  let tx = camX + hx * CAM_AHEAD + sx * 14;
+  let ty = GROUND + CAM_LOOK_H;
+  let tz = camZ + hz * CAM_AHEAD + sz * 14;
+  const intro = game.priestIntro;
+  if (intro && game.giant) {
+    const direction = intro.exiting ? -1 : 1;
+    intro.mix = clamp(intro.mix + direction * dt * 1.8, 0, 1);
+    const mix = intro.mix * intro.mix * (3 - 2 * intro.mix);
+    const priest = game.giant;
+    ex += (priest.x - ex) * mix;
+    ey += (GROUND + 92 - ey) * mix;
+    ez += (priest.y + 185 - ez) * mix;
+    tx += (priest.x - 68 - tx) * mix;
+    ty += (GROUND + 48 - ty) * mix;
+    tz += (priest.y - tz) * mix;
+  }
   let fx = tx - ex;
   let fy = ty - ey;
   let fz = tz - ez;
@@ -3509,6 +3811,58 @@ function drawMerchant3d(merchant) {
 }
 
 /**
+ * The oversized black-clad restorer who appears during waves six through ten.
+ */
+function drawGiant3d() {
+  const giant = game.giant;
+  if (!giant) return;
+  pushModel();
+  apply(matTranslate(giant.x, GROUND, giant.y));
+  footShadow(22, 15);
+  apply(matRotateY(giant.yaw));
+  apply(matScale(1.48, 1.48, 1.48));
+  pushModel();
+  apply(matTranslate(0, 28, 0));
+  ellipsoid(15, 20, 11, '#121218');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 20, 1));
+  ellipsoid(17, 13, 12, '#09090d');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 49, 1));
+  ellipsoid(9, 10, 8, '#c89572');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 55, -1));
+  ellipsoid(9.8, 6.5, 8.5, '#17151a');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 31, 9));
+  cube(15, 3, 2.5, '#6d2020');
+  popModel();
+  drawLimbs({
+    step: giant.phase,
+    hands: giant.grabTime > 0 ? 1 : (giant.target ? 0.35 : 0),
+    crouch: 0,
+    skin: '#c89572',
+    sleeve: '#121218',
+    hip: 6.5,
+    hipY: 18,
+    legR: 4,
+    legLen: 18,
+    shoulder: 15,
+    shoulderY: 39,
+    armR: 3.4,
+    armLen: 27,
+    stride: 0.55,
+    armSwing: 0.55,
+    reach: 0,
+  });
+  popModel();
+}
+
+/**
  * A thin gold ring lying flat above the head, like an angel's halo.
  * @param {number} radius
  * @param {number} pulse
@@ -3584,13 +3938,16 @@ function drawPlayer3d() {
   const gait = p.gait || 0;
   const wob = Math.sin(p.bob);
   const toss = p.toss || 0;
+  const held = p.grabbed > 0;
+  const heldShake = p.heldShake || 0;
   const haloPulse = 0.5 + 0.5 * Math.sin(performance.now() / 360);
   pushModel();
-  apply(matTranslate(p.x, GROUND + Math.abs(wob) * (0.4 + 1.8 * gait), p.y));
+  apply(matTranslate(p.x, GROUND, p.y));
+  footShadow(7.2, 5.3);
+  apply(matTranslate(heldShake * 2.4, (p.heldHeight || 0) + Math.abs(wob) * (0.4 + 1.8 * gait), 0));
   apply(matScale(1.32, 1.32, 1.32));
-  footShadow(5.5, 4);
   apply(matRotateY(p.yaw));
-  apply(matRotateZ(wob * (0.02 + 0.06 * gait)));
+  apply(matRotateZ(wob * (0.02 + 0.06 * gait) + heldShake * 0.12));
   apply(matRotateX(0.2 * toss));
   pushModel();
   apply(matTranslate(0, 20, 0));
@@ -3616,7 +3973,7 @@ function drawPlayer3d() {
   popModel();
   drawLimbs({
     step: p.bob,
-    hands: 0,
+    hands: held ? 0.7 : 0,
     skin: '#f3c7a8',
     sleeve: '#f7f4ee',
     hip: 2.2,
@@ -3724,6 +4081,7 @@ function drawScene() {
   drawCourt3d();
   for (let i = 0; i < game.tables.length; i++) drawTable3d(game.tables[i]);
   for (let i = 0; i < game.merchants.length; i++) drawMerchant3d(game.merchants[i]);
+  drawGiant3d();
   drawSneakerPickup3d();
   if (game.player) drawPlayer3d();
   for (let i = 0; i < game.particles.length; i++) drawParticle3d(game.particles[i]);
@@ -3834,22 +4192,25 @@ function drawSpeedFlash() {
 }
 
 /**
- * The short "No." said by whoever just lost a table.
+ * Short protests from whoever just lost a table.
  */
 function drawBubbles() {
   for (let i = 0; i < game.bubbles.length; i++) {
     const bubble = game.bubbles[i];
-    const lift = bubble.merchant ? (bubble.merchant.h || 0) + 78 : 74;
+    if (bubble.delay > 0) continue;
+    const lift = bubble.lift || (bubble.merchant ? (bubble.merchant.h || 0) + 78 : 74);
     const pt = projectToScreen(bubble.x, GROUND + lift, bubble.y);
     if (!pt) continue;
     const remain = bubble.life - bubble.age;
     const alpha = remain < 0.2 ? Math.max(0, remain / 0.2) : 1;
     const rise = Math.min(bubble.age, 0.25) * 14;
+    const text = bubble.text || 'No!';
+    const width = clamp(text.length * 7.5 + 24, 52, 224);
     ctx.save();
     ctx.globalAlpha = alpha;
-    ctx.translate(clamp(pt.x, 58, W - 58), clamp(pt.y - rise, 94, H - 58));
+    ctx.translate(clamp(pt.x, width / 2 + 8, W - width / 2 - 8), clamp(pt.y - rise, 94, H - 58));
     ctx.fillStyle = '#fffaf3';
-    roundRect(-26, -32, 52, 28, 8);
+    roundRect(-width / 2, -32, width, 28, 8);
     ctx.fill();
     ctx.strokeStyle = '#2a1c14';
     ctx.lineWidth = 1.5;
@@ -3860,7 +4221,7 @@ function drawBubbles() {
     ctx.lineTo(5, -4);
     ctx.closePath();
     ctx.fill();
-    label('No.', 0, -18, '700 16px ' + FONT, '#2a1c14', 'center', 'middle');
+    label(text, 0, -18, '700 14px ' + FONT, '#2a1c14', 'center', 'middle');
     ctx.restore();
   }
 }
@@ -3920,15 +4281,19 @@ function draw() {
   ctx.clearRect(0, 0, W, H);
   drawSneakerGlow();
   drawHaloGlow();
-  drawBubbles();
+  if (!game.priestIntro) drawBubbles();
   if (glFailed) {
     label('This browser has no WebGL, so the court cannot be drawn.', W / 2, H / 2, '18px ' + FONT, '#fff6e8', 'center', 'middle');
   }
   if (game.mode === 'play') {
-    drawHud();
-    drawTimeBursts();
-    drawBanner();
-    drawSpeedFlash();
+    if (game.priestIntro) {
+      drawPriestIntro();
+    } else {
+      drawHud();
+      drawTimeBursts();
+      drawBanner();
+      drawSpeedFlash();
+    }
   } else {
     drawOverlay();
   }
