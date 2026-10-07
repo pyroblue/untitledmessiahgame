@@ -1,0 +1,3901 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Untitled Messiah Game</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%23e2b44a'/%3E%3Ccircle cx='8' cy='8' r='3' fill='%23fff6e4'/%3E%3C/svg%3E">
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: #241610;
+    color: #f6ead8;
+    font-family: "Avenir Next", Avenir, "Trebuchet MS", sans-serif;
+  }
+  body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  .stage {
+    position: relative;
+    width: min(100vw, calc((100dvh - 44px) * 960 / 600));
+    max-height: calc(100dvh - 44px);
+    aspect-ratio: 960 / 600;
+    border-radius: 4px;
+    box-shadow: 0 16px 50px rgba(0, 0, 0, 0.35);
+    touch-action: none;
+  }
+  .stage canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+    border-radius: 4px;
+  }
+  #view {
+    background: #6e3028;
+    cursor: pointer;
+    touch-action: none;
+  }
+  #view:focus {
+    outline: none;
+  }
+  #hud {
+    pointer-events: none;
+    background: transparent;
+  }
+  .hint {
+    margin: 0;
+    padding: 0 16px;
+    font-size: clamp(11px, 1.4vw, 14px);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-align: center;
+    color: #f0e2cc;
+  }
+</style>
+</head>
+<body>
+<div class="stage">
+  <canvas id="view" width="960" height="600" tabindex="0" aria-label="Untitled Messiah Game. Flip every table before time runs out."></canvas>
+  <canvas id="hud" width="960" height="600"></canvas>
+</div>
+<p class="hint">WASD / arrows to waddle · Space or click a table to flip it</p>
+<script>
+/** Logical width of the court, in pixels. */
+const W = 960;
+/** Logical height of the court, in pixels. */
+const H = 600;
+/** Walkable floor. Feet are clamped to this rectangle. */
+const FLOOR = { l: 70, t: 110, r: 890, b: 550 };
+/** Visible width added to the temple on every new wave. */
+const COURT_GROW_X = 140;
+/** Visible depth added to the temple on every new wave. */
+const COURT_GROW_Z = 110;
+/** Starting clock, in seconds. */
+const CLOCK = 70;
+/** Seconds added when a wave is cleared. */
+const BONUS = 2;
+/** Seconds immediately earned by overturning a new table. */
+const FLIP_TIME_BONUS = 0.6;
+/** Player speed, in pixels per second. */
+const SPEED = 260;
+/** Player speed after collecting the sneaker. */
+const BOOST_SPEED = 425;
+/** Duration of the sneaker reward callout. */
+const SPEED_FLASH_TIME = 1.8;
+/** Keyboard flip range from the player, in pixels. */
+const KEY_RANGE = 78;
+/** Pointer flip range from the click, in pixels. */
+const POINTER_RANGE = 86;
+/** Pointer must be farther than this to drag-walk. */
+const DRAG_DEAD = 18;
+/** Minimum distance between table anchors. */
+const SEP = 110;
+/** Preferred distance from the player when spawning a table. */
+const CLEARANCE = 120;
+/** Hard minimum so a table never overlaps the player. */
+const BODY_GAP = 64;
+/** How far a body stands out from its center when it bumps a table. */
+const BODY = 14;
+/** A table this far above the floor can be walked under. */
+const TABLE_CLEAR = 30;
+/** Merchants this close to a flip are launched. */
+const MERCHANT_R = 90;
+/** How long a wave banner stays up, in seconds. */
+const BANNER_TIME = 2.2;
+/** Flips are ignored while the banner timer is above this. */
+const FLIP_LOCK = 1.35;
+/** Length of the table-fall animation, in seconds. */
+const FLIP_ANIM = 0.4;
+/** How long the player's arms stay in the table-flip follow-through. */
+const SWING_TIME = 0.5;
+/** localStorage key for the best score. */
+const BEST_KEY = 'umg-best';
+/** Clean interface face shared by copy, labels, and numbers. */
+const FONT = '"Avenir Next", Avenir, "Trebuchet MS", sans-serif';
+/** Papyrus is reserved for the game title and dramatic story headlines. */
+const HEAD = 'Papyrus, fantasy';
+/** Heavy interface face for scores and callouts. */
+const NUM = '"Avenir Next", Avenir, "Trebuchet MS", sans-serif';
+/** Tablecloth colors. */
+const CLOTHS = ['#c4503c', '#e6d3b0', '#8d3a48', '#d08a3a'];
+/** Vertical field of view, in radians. Wide enough to see the court past the shoulder. */
+const CAM_FOV = 0.78;
+/** How far behind the player the camera sits. */
+const CAM_BACK = 210;
+/** Camera height above the floor. Just over the halo. */
+const CAM_HEIGHT = 102;
+/** Shift onto the right shoulder so the court stays visible ahead. */
+const CAM_SHOULDER = 108;
+/** How far ahead of the player the camera looks. */
+const CAM_AHEAD = 260;
+/** Height of the point the camera looks at. Kept near the shoulders so the body stays in frame. */
+const CAM_LOOK_H = 42;
+/** Smoothed yaw the over-the-shoulder camera is currently using. */
+let camYaw = Math.PI;
+/** Smoothed spot the camera rig follows, so starts and stops ease. */
+let camX = 480;
+let camZ = 460;
+/** How fast the rig catches the player, and how fast yaw settles. */
+const CAM_FOLLOW = 4.2;
+const CAM_YAW = 5;
+/** How far the camera is allowed to sit, from 1 (full) down toward the player. */
+let camPull = 1;
+/** Last time the camera was updated, for frame-rate independent lag. */
+let camStamp = 0;
+/** Top of the stone tiles, where feet and clicks land. */
+const GROUND = 8;
+
+const view = document.getElementById('view');
+const canvas = view;
+const ui = document.getElementById('hud');
+const ctx = ui.getContext('2d');
+let gl = null;
+
+const keys = { left: false, right: false, up: false, down: false };
+const pointer = { down: false, x: 0, y: 0 };
+
+/**
+ * Load one local SVG from the Lucide icon pack.
+ * @param {string} name
+ * @returns {HTMLImageElement}
+ */
+function loadHudIcon(name) {
+  const image = new Image();
+  image.src = 'icons/lucide/' + name + '.svg';
+  return image;
+}
+
+/** Local Lucide icons keep the HUD consistent and available offline. */
+const HUD_ICONS = {
+  table: loadHudIcon('table'),
+  wave: loadHudIcon('wave'),
+  time: loadHudIcon('time'),
+  play: loadHudIcon('play'),
+};
+
+let dpr = 1;
+let last = 0;
+
+const game = {
+  mode: 'title',
+  time: CLOCK,
+  score: 0,
+  best: 0,
+  bested: false,
+  wave: 1,
+  banner: 0,
+  bannerSub: '',
+  shake: 0,
+  sneaker: null,
+  sneakerAwarded: false,
+  speedFlash: 0,
+  player: null,
+  tables: [],
+  merchants: [],
+  particles: [],
+  bubbles: [],
+  timeBursts: [],
+};
+
+/**
+ * Move a value toward a target. A higher rate arrives sooner.
+ * @param {number} current
+ * @param {number} target
+ * @param {number} dt
+ * @param {number} rate
+ * @returns {number}
+ */
+function approach(current, target, dt, rate) {
+  return current + (target - current) * (1 - Math.exp(-rate * dt));
+}
+
+/**
+ * Clamp n to the inclusive range [a, b].
+ * @param {number} n
+ * @param {number} a
+ * @param {number} b
+ * @returns {number}
+ */
+function clamp(n, a, b) {
+  return Math.max(a, Math.min(b, n));
+}
+
+/**
+ * Random float in [a, b).
+ * @param {number} a
+ * @param {number} b
+ * @returns {number}
+ */
+function rand(a, b) {
+  return a + Math.random() * (b - a);
+}
+
+/**
+ * Distance between two points.
+ * @param {number} ax
+ * @param {number} ay
+ * @param {number} bx
+ * @param {number} by
+ * @returns {number}
+ */
+function dist(ax, ay, bx, by) {
+  return Math.hypot(ax - bx, ay - by);
+}
+
+/**
+ * Read the stored best score. Storage failures count as zero.
+ * @returns {number}
+ */
+function loadBest() {
+  try {
+    const n = Number(localStorage.getItem(BEST_KEY));
+    if (!Number.isFinite(n) || n < 0) return 0;
+    return Math.floor(n);
+  } catch (err) {
+    return 0;
+  }
+}
+
+/**
+ * Store the best score. Ignore quota and privacy errors.
+ * @param {number} score
+ */
+function saveBest(score) {
+  try {
+    localStorage.setItem(BEST_KEY, String(score));
+  } catch (err) {
+    /* private mode and file origins may refuse storage */
+  }
+}
+
+/** Recorded foley (CC0), encoded to MP3. See sounds/foley/LICENSE.txt. */
+const FOLEY = 'sounds/foley/';
+
+/**
+ * Build paths for a list of foley clip names.
+ * @param {string[]} names
+ * @returns {string[]}
+ */
+function foleySet(names) {
+  const files = [];
+  for (let i = 0; i < names.length; i++) files.push(FOLEY + names[i] + '.mp3');
+  return files;
+}
+
+/** Wood, metal, coin, and stone recordings. No interface tones. */
+const SFX = {
+  flip: foleySet(['wood_breaking_01', 'wood_breaking_02', 'wood_falling_01', 'wood_falling_05', 'wood_falling_06']),
+  kick: foleySet(['wood_hit_01', 'wood_hit_02', 'wood_hit_03', 'wood_hit_04', 'wood_hit_05', 'wood_hit_06']),
+  crack: foleySet(['wood_cracking_01', 'wood_cracking_02', 'wood_cracking_03', 'wood_cracking_04']),
+  dishes: foleySet(['metal_falling_01', 'metal_falling_02', 'metal_sheet_01']),
+  land: foleySet(['wood_slam_01', 'wood_slam_02', 'wood_slam_03', 'wood_slam_04']),
+  step: foleySet(['stone_l1', 'stone_l2', 'stone_l3', 'stone_r1', 'stone_r2', 'stone_r3']),
+  shove: foleySet(['knock_1', 'knock_2', 'knock_3', 'knock_4', 'knock_5']),
+  bell: foleySet(['clang_1', 'clang_2', 'clang_3', 'clang_4', 'clang_5']),
+  cower: [
+    'sounds/kenney-rpg/cloth1.mp3',
+    'sounds/kenney-rpg/cloth2.mp3',
+    'sounds/kenney-rpg/cloth3.mp3',
+    'sounds/kenney-rpg/cloth4.mp3',
+  ],
+  wave: foleySet(['knock_1', 'knock_3', 'knock_5']),
+};
+
+/**
+ * Warm the clip files so the first flip does not wait on the network.
+ */
+function preloadSfx() {
+  const seen = {};
+  for (const bank of Object.keys(SFX)) {
+    for (const src of SFX[bank]) {
+      if (seen[src]) continue;
+      seen[src] = true;
+      const audio = new Audio();
+      audio.preload = 'auto';
+      audio.src = src;
+    }
+  }
+}
+
+/**
+ * Play one random clip from a bank. Later hits can overlap.
+ * @param {string} bank
+ * @param {{volume?:number,rate?:number,delay?:number}} [opts]
+ */
+function playSfx(bank, opts) {
+  const files = SFX[bank];
+  if (!files || !files.length) return;
+  const opt = opts || {};
+  const audio = new Audio(files[Math.floor(Math.random() * files.length)]);
+  audio.volume = opt.volume == null ? 0.55 : opt.volume;
+  if (opt.rate) audio.playbackRate = opt.rate;
+  const start = () => {
+    const pending = audio.play();
+    if (pending && pending.catch) pending.catch(function () {});
+  };
+  if (opt.delay) window.setTimeout(start, opt.delay * 1000);
+  else start();
+}
+
+/**
+ * A little pitch scatter so repeated clips do not sound copied.
+ * @returns {number}
+ */
+function sfxRate() {
+  return 0.98 + Math.random() * 0.05;
+}
+
+/** Shared context for the coin chimes. */
+let audioCtx = null;
+
+/**
+ * Create or resume audio after a click or key press.
+ * @returns {AudioContext | null}
+ */
+function unlockAudio() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    if (!audioCtx) audioCtx = new AC();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    return audioCtx;
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * One short coin in the splash. The pitch dips a little as it flies.
+ * @param {AudioContext} ac
+ * @param {AudioNode} dest
+ * @param {number} time
+ * @param {number} freq
+ * @param {number} level
+ */
+function coinChime(ac, dest, time, freq, level) {
+  const body = ac.createOscillator();
+  const spark = ac.createOscillator();
+  const amp = ac.createGain();
+  const sparkAmp = ac.createGain();
+  body.type = 'triangle';
+  spark.type = 'sine';
+  body.frequency.setValueAtTime(freq, time);
+  spark.frequency.setValueAtTime(freq * 2, time);
+  body.frequency.exponentialRampToValueAtTime(freq * 0.94, time + 0.14);
+  amp.gain.setValueAtTime(0.0001, time);
+  amp.gain.exponentialRampToValueAtTime(level, time + 0.006);
+  amp.gain.exponentialRampToValueAtTime(0.0001, time + 0.15);
+  sparkAmp.gain.setValueAtTime(0.0001, time);
+  sparkAmp.gain.exponentialRampToValueAtTime(level * 0.4, time + 0.004);
+  sparkAmp.gain.exponentialRampToValueAtTime(0.0001, time + 0.08);
+  body.connect(amp);
+  spark.connect(sparkAmp);
+  amp.connect(dest);
+  sparkAmp.connect(dest);
+  body.start(time);
+  spark.start(time);
+  body.stop(time + 0.16);
+  spark.stop(time + 0.1);
+}
+
+/**
+ * A rising handful of coin chimes when a table first spills.
+ */
+function playCoinSplash() {
+  const ac = unlockAudio();
+  if (!ac) return;
+  const bus = ac.createGain();
+  bus.gain.setValueAtTime(0.7, ac.currentTime);
+  bus.connect(ac.destination);
+  const t = ac.currentTime + 0.02;
+  const notes = [784, 988, 1175, 1568, 1976, 2349, 3136];
+  for (let i = 0; i < notes.length; i++) {
+    coinChime(ac, bus, t + i * 0.038, notes[i], 0.11);
+  }
+  for (let i = 0; i < 4; i++) {
+    coinChime(ac, bus, t + 0.1 + i * 0.028, notes[4 + (i % 3)] * 1.25, 0.05);
+  }
+}
+
+/** Eighth-note length of the hymn, in seconds. About 92 bpm. */
+const HYMN_STEP = 60 / 92 / 2;
+/** Lead voice, one MIDI note per eighth. 0 is a rest. */
+const HYMN_LEAD = [
+  62, 65, 67, 69, 69, 67, 65, 64,
+  62, 65, 69, 72, 69, 67, 65, 62,
+  65, 67, 69, 72, 74, 72, 69, 67,
+  65, 64, 62, 65, 64, 62, 62, 0,
+  69, 72, 74, 76, 77, 76, 74, 72,
+  74, 72, 69, 67, 69, 67, 65, 64,
+  65, 69, 72, 74, 72, 69, 67, 65,
+  64, 62, 60, 62, 62, 62, 0, 0,
+];
+/** Alto, a third under the tune, one note per quarter. */
+const HYMN_ALTO = [
+  65, 64, 62, 60,
+  62, 65, 64, 62,
+  65, 69, 67, 64,
+  62, 60, 62, 62,
+  69, 67, 65, 64,
+  65, 64, 62, 60,
+  69, 67, 65, 64,
+  62, 60, 62, 62,
+];
+/** Bass roots, one note per half note. */
+const HYMN_BASS = [50, 45, 53, 48, 50, 45, 48, 50, 53, 48, 46, 45, 43, 45, 48, 50];
+/** True once the background track is running. */
+let musicOn = false;
+/** Seamlessly looping CC0 16-bit background track. */
+let musicTrack = null;
+/** Next step time on the audio clock. */
+let musicNext = 0;
+/** Index into the hymn, in eighth notes. */
+let musicStep = 0;
+/** Short noise burst reused for the soft beat. */
+let musicNoise = null;
+/** Crushed music bus, kept apart from the sound effects. */
+let musicBus = null;
+
+/**
+ * Frequency of a MIDI note number.
+ * @param {number} note
+ * @returns {number}
+ */
+function midiFreq(note) {
+  return 440 * Math.pow(2, (note - 69) / 12);
+}
+
+/**
+ * Quantize the hymn so it sounds like a low-rate game cartridge.
+ * @param {number} bits
+ * @returns {Float32Array}
+ */
+function crushCurve(bits) {
+  const n = 1024;
+  const steps = Math.pow(2, bits);
+  const curve = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = (i / (n - 1)) * 2 - 1;
+    curve[i] = Math.round(x * steps) / steps;
+  }
+  return curve;
+}
+
+/**
+ * Build the crushed hymn bus and a tiny noise tick.
+ * @param {AudioContext} ac
+ */
+function buildMusic(ac) {
+  const crush = ac.createWaveShaper();
+  crush.curve = crushCurve(5);
+  crush.oversample = '4x';
+  const low = ac.createBiquadFilter();
+  low.type = 'lowpass';
+  low.frequency.value = 2800;
+  const master = ac.createGain();
+  master.gain.value = 0.42;
+  crush.connect(low);
+  low.connect(master);
+  master.connect(ac.destination);
+  musicBus = crush;
+  const len = Math.floor(ac.sampleRate * 0.04);
+  musicNoise = ac.createBuffer(1, len, ac.sampleRate);
+  const data = musicNoise.getChannelData(0);
+  for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
+}
+
+/**
+ * One cartridge voice on the hymn bus.
+ * @param {number} time
+ * @param {number} note MIDI note, or 0 for a rest.
+ * @param {number} dur
+ * @param {OscillatorType} type
+ * @param {number} level
+ */
+function hymnNote(time, note, dur, type, level) {
+  if (!note || !audioCtx || !musicBus) return;
+  const osc = audioCtx.createOscillator();
+  const amp = audioCtx.createGain();
+  osc.type = type;
+  osc.frequency.setValueAtTime(midiFreq(note), time);
+  amp.gain.setValueAtTime(level, time);
+  amp.gain.exponentialRampToValueAtTime(0.0001, time + dur);
+  osc.connect(amp);
+  amp.connect(musicBus);
+  osc.start(time);
+  osc.stop(time + dur + 0.02);
+}
+
+/**
+ * A quiet tick on the beat, so the hymn still feels like a game.
+ * @param {number} time
+ * @param {number} level
+ */
+function hymnTick(time, level) {
+  if (!audioCtx || !musicNoise || !musicBus) return;
+  const src = audioCtx.createBufferSource();
+  const amp = audioCtx.createGain();
+  const high = audioCtx.createBiquadFilter();
+  src.buffer = musicNoise;
+  high.type = 'highpass';
+  high.frequency.value = 1800;
+  amp.gain.setValueAtTime(level, time);
+  amp.gain.exponentialRampToValueAtTime(0.0001, time + 0.04);
+  src.connect(high);
+  high.connect(amp);
+  amp.connect(musicBus);
+  src.start(time);
+  src.stop(time + 0.05);
+}
+
+/**
+ * Schedule the next few eighths of the looping hymn.
+ */
+function pumpMusic() {
+  // The encoded track loops itself; this remains for the main-loop contract.
+}
+
+/**
+ * Start the 16-bit battle theme once. Later runs leave it looping.
+ */
+function startMusic() {
+  unlockAudio();
+  if (musicOn) return;
+  if (!musicTrack) {
+    musicTrack = new Audio('sounds/music/battle-theme-loop.ogg');
+    musicTrack.preload = 'auto';
+    musicTrack.loop = true;
+    musicTrack.volume = 0.32;
+  }
+  musicOn = true;
+  const pending = musicTrack.play();
+  if (pending && pending.catch) pending.catch(() => { musicOn = false; });
+}
+
+/**
+ * Wood and dishes when a table is flipped. Coins chime on the first spill.
+ * @param {object} table
+ * @param {boolean} again
+ */
+function playFlip(table, again) {
+  playSfx(again ? 'kick' : 'flip', { volume: again ? 0.5 : 0.62, rate: sfxRate() });
+  playSfx('dishes', { volume: again ? 0.2 : 0.32, delay: 0.03, rate: sfxRate() });
+  if (!again) playCoinSplash();
+  if (table.scars && table.scars.hits >= 3) {
+    playSfx('crack', { volume: 0.26, delay: 0.05, rate: sfxRate() });
+  }
+}
+
+/**
+ * Stone steps on the beat of the walk cycle.
+ * @param {object} p
+ */
+function tickSteps(p) {
+  const sign = Math.sin(p.bob) >= 0 ? 1 : -1;
+  if (p.walking && p.gait > 0.45 && p.stepSign && sign !== p.stepSign) {
+    playSfx('step', { volume: 0.34 + 0.12 * p.gait, rate: sfxRate() });
+  }
+  p.stepSign = p.walking ? sign : 0;
+}
+
+/**
+ * Player standing at the bottom center of the court.
+ * @returns {{x:number,y:number,yaw:number,bob:number,moving:boolean,swing:number}}
+ */
+function makePlayer() {
+  return { x: 480, y: 460, yaw: Math.PI, bob: 0, moving: false, swing: 0 };
+}
+
+/**
+ * Expand the playable temple around its fixed center for a wave.
+ * @param {number} wave
+ */
+function setCourtSize(wave) {
+  const growth = Math.max(0, wave - 1);
+  const halfW = 410 + growth * COURT_GROW_X / 2;
+  const halfD = 220 + growth * COURT_GROW_Z / 2;
+  FLOOR.l = 480 - halfW;
+  FLOOR.r = 480 + halfW;
+  FLOOR.t = 330 - halfD;
+  FLOOR.b = 330 + halfD;
+}
+
+/**
+ * A random table footprint on the open floor.
+ * @returns {{x:number,y:number,w:number}}
+ */
+function randomSpot() {
+  const w = rand(78, 96);
+  return {
+    w,
+    x: rand(FLOOR.l + w / 2 + 10, FLOOR.r - w / 2 - 10),
+    y: rand(FLOOR.t + 64, FLOOR.b - 40),
+  };
+}
+
+/**
+ * A spot far from the player, used only when random placement finds nothing.
+ * @returns {{x:number,y:number,w:number}}
+ */
+function emergencySpot() {
+  const corners = [
+    { x: FLOOR.l + 90, y: FLOOR.t + 80 },
+    { x: FLOOR.r - 90, y: FLOOR.t + 80 },
+    { x: FLOOR.l + 90, y: FLOOR.b - 60 },
+    { x: FLOOR.r - 90, y: FLOOR.b - 60 },
+  ];
+  let best = corners[0];
+  let bestD = -1;
+  for (const corner of corners) {
+    const d = dist(corner.x, corner.y, game.player.x, game.player.y);
+    if (d > bestD) {
+      bestD = d;
+      best = corner;
+    }
+  }
+  return { x: best.x, y: best.y, w: 86 };
+}
+
+/**
+ * Place a table at least 110px from the others and 120px from the player.
+ * After a few hundred misses, keep the roomiest gap that is not inside the player.
+ * @param {{x:number,y:number}[]} existing
+ * @returns {{x:number,y:number,w:number}}
+ */
+function findSpot(existing) {
+  let best = null;
+  let bestScore = -1;
+  let fallback = null;
+  let fallbackScore = -1;
+  for (let i = 0; i < 400; i++) {
+    const spot = randomSpot();
+    const fromPlayer = dist(spot.x, spot.y, game.player.x, game.player.y);
+    if (fromPlayer < BODY_GAP) continue;
+    let nearest = Infinity;
+    for (const other of existing) {
+      nearest = Math.min(nearest, dist(spot.x, spot.y, other.x, other.y));
+    }
+    if (game.sneaker) {
+      nearest = Math.min(nearest, dist(spot.x, spot.y, game.sneaker.x, game.sneaker.y));
+    }
+    const gap = Math.min(fromPlayer, nearest);
+    if (gap > fallbackScore) {
+      fallbackScore = gap;
+      fallback = spot;
+    }
+    if (fromPlayer < CLEARANCE) continue;
+    if (nearest < SEP) continue;
+    if (existing.length === 0) return spot;
+    if (nearest > bestScore) {
+      bestScore = nearest;
+      best = spot;
+    }
+  }
+  return best || fallback || emergencySpot();
+}
+
+/**
+ * A pacing spot just beside a table, kept inside the room.
+ * @param {{x:number,y:number,w:number}} table
+ * @returns {{x:number,y:number}}
+ */
+function merchantSpot(table) {
+  const inward = table.x < (FLOOR.l + FLOOR.r) / 2 ? 1 : -1;
+  let x = table.x + inward * (table.w * 0.42 + 28);
+  x = clamp(x, FLOOR.l + 20, FLOOR.r - 20);
+  if (Math.abs(x - table.x) < 36) {
+    x = clamp(table.x - inward * (table.w * 0.42 + 28), FLOOR.l + 20, FLOOR.r - 20);
+  }
+  const y = clamp(table.y + rand(-6, 16), FLOOR.t + 48, FLOOR.b - 12);
+  return { x, y };
+}
+
+/**
+ * Spawn one merchant per table.
+ * @param {number} count
+ */
+function spawnWave(count) {
+  const placed = [];
+  game.tables = [];
+  game.merchants = [];
+  for (let i = 0; i < count; i++) {
+    const spot = findSpot(placed);
+    placed.push(spot);
+    const table = {
+      x: spot.x,
+      y: spot.y,
+      w: spot.w,
+      flipped: false,
+      anim: 0,
+      fall: 1,
+      rx: 0,
+      ry: 0,
+      rz: 0,
+      vrx: 0,
+      vry: 0,
+      vrz: 0,
+      h: 0,
+      vh: 0,
+      cloth: CLOTHS[i % CLOTHS.length],
+      coins: [
+        { x: rand(-18, -4), z: rand(-6, 8), r: rand(3.6, 5) },
+        { x: rand(2, 16), z: rand(-8, 6), r: rand(3.2, 4.4) },
+        { x: rand(-6, 8), z: rand(-2, 10), r: 3.4 },
+      ],
+    };
+    game.tables.push(table);
+    const spotM = merchantSpot(table);
+    game.merchants.push({
+      x: spotM.x,
+      y: spotM.y,
+      homeX: spotM.x,
+      homeY: spotM.y,
+      color: i % 2 === 0 ? '#7a5584' : '#c45c52',
+      facing: spotM.x < table.x ? 1 : -1,
+      yaw: spotM.x < table.x ? 0.5 : -0.5,
+      vx: 0,
+      vy: 0,
+      h: 0,
+      vh: 0,
+      air: false,
+      spin: 0,
+      spinV: 0,
+      phase: rand(0, Math.PI * 2),
+      flee: false,
+      run: 0,
+    });
+  }
+}
+
+/**
+ * Start a run from the title card or the game-over card.
+ */
+function startRun() {
+  unlockAudio();
+  startMusic();
+  game.mode = 'play';
+  game.time = CLOCK;
+  game.score = 0;
+  game.bested = false;
+  game.wave = 1;
+  game.banner = BANNER_TIME;
+  game.bannerSub = 'flip the table';
+  game.shake = 12;
+  game.sneaker = null;
+  game.sneakerAwarded = false;
+  game.speedFlash = 0;
+  game.player = makePlayer();
+  setCourtSize(1);
+  camYaw = game.player.yaw;
+  camX = game.player.x;
+  camZ = game.player.y;
+  camPull = 1;
+  game.particles = [];
+  game.bubbles = [];
+  game.timeBursts = [];
+  pointer.down = false;
+  spawnWave(1);
+  playSfx('wave', { volume: 0.42, rate: 1 });
+}
+
+/**
+ * End the run when the clock hits zero, and store a higher best.
+ */
+function endRun() {
+  game.mode = 'over';
+  pointer.down = false;
+  playSfx('bell', { volume: 0.42, rate: 1.04 });
+  if (game.score > game.best) {
+    game.best = game.score;
+    game.bested = true;
+    saveBest(game.best);
+  }
+}
+
+/**
+ * Map a keyboard event onto a stable code.
+ * @param {KeyboardEvent} e
+ * @returns {string}
+ */
+function codeOf(e) {
+  if (e.code) return e.code;
+  const map = {
+    ' ': 'Space',
+    Enter: 'Enter',
+    ArrowLeft: 'ArrowLeft',
+    ArrowRight: 'ArrowRight',
+    ArrowUp: 'ArrowUp',
+    ArrowDown: 'ArrowDown',
+    a: 'KeyA',
+    A: 'KeyA',
+    d: 'KeyD',
+    D: 'KeyD',
+    w: 'KeyW',
+    W: 'KeyW',
+    s: 'KeyS',
+    S: 'KeyS',
+    e: 'KeyE',
+    E: 'KeyE',
+  };
+  return map[e.key] || '';
+}
+
+/**
+ * Set one movement key. Other codes are ignored.
+ * @param {string} code
+ * @param {boolean} down
+ */
+function setKey(code, down) {
+  if (code === 'ArrowLeft' || code === 'KeyA') keys.left = down;
+  else if (code === 'ArrowRight' || code === 'KeyD') keys.right = down;
+  else if (code === 'ArrowUp' || code === 'KeyW') keys.up = down;
+  else if (code === 'ArrowDown' || code === 'KeyS') keys.down = down;
+}
+
+/**
+ * Movement keys, a one-shot flip, or starting a run.
+ * @param {KeyboardEvent} e
+ */
+function onKeyDown(e) {
+  const code = codeOf(e);
+  if (code === 'Space' || code === 'Enter' || code.indexOf('Arrow') === 0 || code === 'KeyW' || code === 'KeyA' || code === 'KeyS' || code === 'KeyD' || code === 'KeyE') {
+    e.preventDefault();
+  }
+  if (e.repeat) return;
+  setKey(code, true);
+  if (game.mode !== 'play') {
+    if (code === 'Enter' || code === 'Space') startRun();
+    return;
+  }
+  if (code === 'Space' || code === 'KeyE') {
+    tryFlipAt(game.player.x, game.player.y, KEY_RANGE);
+  }
+}
+
+/**
+ * Release a movement key.
+ * @param {KeyboardEvent} e
+ */
+function onKeyUp(e) {
+  setKey(codeOf(e), false);
+}
+
+/**
+ * Logical 960×600 pixel under a pointer event.
+ * @param {PointerEvent} e
+ * @returns {{x:number,y:number}}
+ */
+function screenPoint(e) {
+  const rect = view.getBoundingClientRect();
+  const width = rect.width || W;
+  const height = rect.height || H;
+  return {
+    x: ((e.clientX - rect.left) / width) * W,
+    y: ((e.clientY - rect.top) / height) * H,
+  };
+}
+
+/**
+ * Convert a pointer event into a point on the floor.
+ * Screen position is unprojected through the 3D camera.
+ * @param {PointerEvent} e
+ * @returns {{x:number,y:number}}
+ */
+function canvasPoint(e) {
+  const screen = screenPoint(e);
+  if (!cam) return screen;
+  return floorAt(screen.x, screen.y);
+}
+
+/**
+ * Start a run, or flip the table under the pointer and begin a drag.
+ * @param {PointerEvent} e
+ */
+function onPointerDown(e) {
+  if (e.cancelable) e.preventDefault();
+  const screen = screenPoint(e);
+  const point = cam ? floorAt(screen.x, screen.y) : screen;
+  pointer.x = point.x;
+  pointer.y = point.y;
+  canvas.focus({ preventScroll: true });
+  if (game.mode !== 'play') {
+    startRun();
+    return;
+  }
+  pointer.down = true;
+  try {
+    canvas.setPointerCapture(e.pointerId);
+  } catch (err) {
+    /* capture can fail if the pointer is already gone */
+  }
+  if (game.banner > FLIP_LOCK) return;
+  const aimed = tableAlongRay(screen.x, screen.y);
+  if (aimed && dist(game.player.x, game.player.y, aimed.x, aimed.y) <= KEY_RANGE) {
+    flipTable(aimed);
+    return;
+  }
+  const tapped = nearestUpright(point.x, point.y, POINTER_RANGE);
+  if (tapped && dist(game.player.x, game.player.y, tapped.x, tapped.y) <= KEY_RANGE) {
+    flipTable(tapped);
+  }
+}
+
+/**
+ * Track a held pointer so drag-walking follows it.
+ * @param {PointerEvent} e
+ */
+function onPointerMove(e) {
+  if (!pointer.down) return;
+  const point = canvasPoint(e);
+  pointer.x = point.x;
+  pointer.y = point.y;
+}
+
+/**
+ * Stop drag-walking when the pointer is released.
+ */
+function onPointerUp() {
+  pointer.down = false;
+}
+
+/**
+ * Nearest table within range, upright or already flipped.
+ * @param {number} x
+ * @param {number} y
+ * @param {number} range
+ * @returns {object | null}
+ */
+function nearestUpright(x, y, range) {
+  let best = null;
+  let bestD = range;
+  for (const table of game.tables) {
+    const d = dist(table.x, table.y, x, y);
+    if (d <= bestD) {
+      bestD = d;
+      best = table;
+    }
+  }
+  return best;
+}
+
+/**
+ * Flip the nearest upright table in range when the banner allows it.
+ * @param {number} x
+ * @param {number} y
+ * @param {number} range
+ * @returns {boolean}
+ */
+function tryFlipAt(x, y, range) {
+  if (game.mode !== 'play') return false;
+  if (game.banner > FLIP_LOCK) return false;
+  const table = nearestUpright(x, y, range);
+  if (!table) return false;
+  flipTable(table);
+  return true;
+}
+
+/**
+ * Pop a merchant up and away from a flipped table.
+ * @param {object} merchant
+ * @param {object} table
+ */
+function launchMerchant(merchant, table) {
+  const dx = merchant.x - table.x || (Math.random() < 0.5 ? -1 : 1);
+  const dy = merchant.y - table.y;
+  const len = Math.hypot(dx, dy) || 1;
+  merchant.vx = (dx / len) * 160 + rand(-30, 30);
+  merchant.vy = (dy / len) * 160 + rand(-30, 30);
+  merchant.vh = 460;
+  merchant.h = 0;
+  merchant.air = true;
+  merchant.flee = false;
+  merchant.spin = 0;
+  merchant.spinV = rand(-8, 8);
+  if (Math.abs(merchant.spinV) < 4) merchant.spinV = merchant.spinV < 0 ? -6 : 6;
+  playSfx('shove', { volume: 0.34, rate: sfxRate() });
+}
+
+/**
+ * Coins and scrolls bursting off a table.
+ * @param {object} table
+ * @param {number} [count]
+ */
+function burst(table, count) {
+  const n = count || 10;
+  for (let i = 0; i < n; i++) {
+    game.particles.push({
+      kind: i < n * 0.7 ? 'coin' : 'scroll',
+      x: table.x + rand(-16, 16),
+      y: table.y + rand(-10, 10),
+      h: 34,
+      vx: rand(-80, 80),
+      vy: rand(-80, 80),
+      vh: rand(220, 420),
+      rot: rand(0, 6),
+      vr: rand(-7, 7),
+      age: 0,
+      life: rand(0.55, 0.95),
+    });
+  }
+}
+
+/**
+ * Break a table a little more on every hit: cracks, then legs, then the top.
+ * @param {object} table
+ */
+function scarTable(table) {
+  if (!table.scars) {
+    table.scars = {
+      dent: { x: rand(-10, 8), z: rand(-6, 6) },
+      legs: [],
+      cracks: [],
+      hits: 0,
+    };
+  }
+  const scars = table.scars;
+  scars.hits += 1;
+  if (scars.cracks.length < 8) {
+    scars.cracks.push({
+      x: rand(-14, 14),
+      z: rand(-10, 10),
+      yaw: rand(0, Math.PI),
+      len: rand(10, 16) + Math.min(scars.hits, 5) * 2,
+    });
+  }
+  const wantLegs = Math.min(4, scars.hits);
+  while (scars.legs.length < wantLegs) {
+    let placed = false;
+    for (let n = 0; n < 4; n++) {
+      if (scars.legs.indexOf(n) >= 0) continue;
+      scars.legs.push(n);
+      placed = true;
+      break;
+    }
+    if (!placed) break;
+  }
+}
+
+/**
+ * Shove a table so it flips over and keeps spinning.
+ * @param {object} table
+ */
+function kickTable(table) {
+  const dir = game.player && game.player.x <= table.x ? 1 : -1;
+  table.fall = dir;
+  table.vrx += dir * 8;
+  table.vry += dir * rand(5, 10);
+  table.vrz += rand(-4, 4);
+  const cap = 18;
+  table.vrx = clamp(table.vrx, -cap, cap);
+  table.vry = clamp(table.vry, -cap, cap);
+  table.vrz = clamp(table.vrz, -cap, cap);
+  table.vh = Math.min(150, table.vh + 80);
+}
+
+/**
+ * Overturn a table, or spin one that is already down.
+ * Only the first hit scores and startles the court.
+ * @param {object} table
+ */
+function flipTable(table) {
+  const again = table.flipped;
+  if (!again) {
+    table.flipped = true;
+    table.anim = 0;
+    table.fall = game.player.x <= table.x ? 1 : -1;
+    game.score += 1;
+    game.time += FLIP_TIME_BONUS;
+    game.timeBursts.push({
+      x: table.x,
+      y: table.y,
+      age: 0,
+      life: 1.15,
+    });
+  }
+  kickTable(table);
+  scarTable(table);
+  game.shake = again ? 5 : 7;
+  burst(table, again ? 6 : 10);
+
+  if (!again) {
+    let speaker = null;
+    let speakerD = MERCHANT_R;
+    for (const merchant of game.merchants) {
+      const d = dist(merchant.x, merchant.y, table.x, table.y);
+      if (d > MERCHANT_R) continue;
+      launchMerchant(merchant, table);
+      if (d <= speakerD) {
+        speakerD = d;
+        speaker = merchant;
+      }
+    }
+    game.bubbles.push({
+      merchant: speaker,
+      x: speaker ? speaker.x : table.x,
+      y: speaker ? speaker.y : table.y,
+      age: 0,
+      life: 0.9,
+    });
+  }
+  if (dist(game.player.x, game.player.y, table.x, table.y) <= KEY_RANGE + 36) {
+    const dx = table.x - game.player.x;
+    const dy = table.y - game.player.y;
+    if (Math.hypot(dx, dy) > 1) game.player.yaw = Math.atan2(dx, dy);
+    game.player.swing = SWING_TIME;
+  }
+  playFlip(table, again);
+}
+
+/**
+ * Wrap an angle into the range -π to π.
+ * @param {number} angle
+ * @returns {number}
+ */
+function wrapAngle(angle) {
+  let wrapped = angle;
+  while (wrapped > Math.PI) wrapped -= Math.PI * 2;
+  while (wrapped < -Math.PI) wrapped += Math.PI * 2;
+  return wrapped;
+}
+
+/**
+ * Move an angle toward another, taking the short way around.
+ * @param {number} current
+ * @param {number} target
+ * @param {number} dt
+ * @param {number} speed Radians per second.
+ * @returns {number}
+ */
+function turnToward(current, target, dt, speed) {
+  let delta = wrapAngle(target - current);
+  const step = speed * dt;
+  if (Math.abs(delta) <= step) return target;
+  return current + Math.sign(delta) * step;
+}
+
+/**
+ * Turn with left and right, and walk forward or back along that facing.
+ * A held pointer still pulls toward the floor point under the cursor.
+ * @param {number} dt
+ */
+function updatePlayer(dt) {
+  const p = game.player;
+  const turn = 3.6 * dt;
+  if (keys.left) p.yaw += turn;
+  if (keys.right) p.yaw -= turn;
+  p.yaw = wrapAngle(p.yaw);
+
+  let x = 0;
+  let y = 0;
+  const fx = Math.sin(p.yaw);
+  const fy = Math.cos(p.yaw);
+  if (keys.up) {
+    x += fx;
+    y += fy;
+  }
+  if (keys.down) {
+    x -= fx;
+    y -= fy;
+  }
+  let steering = false;
+  if (pointer.down) {
+    const dx = pointer.x - p.x;
+    const dy = pointer.y - p.y;
+    const d = Math.hypot(dx, dy);
+    if (d > DRAG_DEAD) {
+      x += dx / d;
+      y += dy / d;
+      steering = true;
+    }
+  }
+  const len = Math.hypot(x, y);
+  p.walking = len > 0.001;
+  p.moving = p.walking || keys.left || keys.right;
+  if (len > 0.001) {
+    const nx = x / len;
+    const ny = y / len;
+    const speed = p.sneakers ? BOOST_SPEED : SPEED;
+    p.x += nx * speed * dt;
+    p.y += ny * speed * dt;
+    if (steering) p.yaw = turnToward(p.yaw, Math.atan2(nx, ny), dt, 9);
+  }
+  const stood = separateFromTables(p.x, p.y, BODY);
+  p.x = clamp(stood.x, FLOOR.l, FLOOR.r);
+  p.y = clamp(stood.y, FLOOR.t, FLOOR.b);
+  p.gait = approach(p.gait || 0, p.moving ? 1 : 0, dt, 10);
+  p.bob += dt * (2.4 + 8.6 * p.gait);
+  tickSteps(p);
+  const tossWant = p.swing > 0 ? Math.min(1, (1 - p.swing / SWING_TIME) * 1.7) : 0;
+  p.toss = approach(p.toss || 0, tossWant, dt, 16);
+  if (p.swing > 0) p.swing = Math.max(0, p.swing - dt);
+}
+
+/**
+ * Tip the first flip closed, then keep tumbling any table that was hit again.
+ * @param {number} dt
+ */
+function updateTables(dt) {
+  for (const table of game.tables) {
+    if (!table.flipped) continue;
+    if (table.anim < FLIP_ANIM) table.anim = Math.min(FLIP_ANIM, table.anim + dt);
+    table.rx += table.vrx * dt;
+    table.ry += table.vry * dt;
+    table.rz += table.vrz * dt;
+    const damp = Math.exp(-1.3 * dt);
+    table.vrx *= damp;
+    table.vry *= damp;
+    table.vrz *= damp;
+    if (Math.hypot(table.vrx, table.vry, table.vrz) < 0.2) {
+      table.vrx = 0;
+      table.vry = 0;
+      table.vrz = 0;
+    }
+    table.vh -= 240 * dt;
+    table.h += table.vh * dt;
+    if (table.h <= 0 && table.vh < 0) {
+      const hit = -table.vh;
+      table.h = 0;
+      table.vh *= -0.22;
+      if (hit > 40) playSfx('land', { volume: Math.min(0.46, hit / 280), rate: sfxRate() });
+      if (Math.abs(table.vh) < 28) table.vh = 0;
+    }
+    restTable(table, dt);
+  }
+}
+
+/**
+ * Horizontal footprint of a tumbled table, before its yaw is applied.
+ * Heights are above the floor.
+ * @param {object} table
+ * @returns {{minX:number,maxX:number,minZ:number,maxZ:number,low:number}}
+ */
+function tableFootprint(table) {
+  const hx = table.w / 2;
+  const hz = 22;
+  const rx = table.rx || 0;
+  const rz = table.rz || 0;
+  const cx = Math.cos(rx);
+  const sx = Math.sin(rx);
+  const cz = Math.cos(rz);
+  const sz = Math.sin(rz);
+  const lift = tableLift(table);
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minZ = Infinity;
+  let maxZ = -Infinity;
+  let low = Infinity;
+  const xs = [-hx, hx];
+  const ys = [-16, 24];
+  const zs = [-hz, hz];
+  for (let i = 0; i < 2; i++) {
+    for (let j = 0; j < 2; j++) {
+      for (let k = 0; k < 2; k++) {
+        const x = xs[i];
+        const y = ys[j];
+        const z = zs[k];
+        const x1 = cz * x - sz * y;
+        const y1 = sz * x + cz * y;
+        const y2 = cx * y1 - sx * z;
+        const z2 = sx * y1 + cx * z;
+        const height = lift + y2 + 16;
+        if (x1 < minX) minX = x1;
+        if (x1 > maxX) maxX = x1;
+        if (z2 < minZ) minZ = z2;
+        if (z2 > maxZ) maxZ = z2;
+        if (height < low) low = height;
+      }
+    }
+  }
+  return { minX: minX, maxX: maxX, minZ: minZ, maxZ: maxZ, low: low };
+}
+
+/**
+ * Push a ground circle out of every table it overlaps.
+ * A table hopping overhead is left alone.
+ * @param {number} x
+ * @param {number} y
+ * @param {number} radius
+ * @returns {{x:number,y:number}}
+ */
+function separateFromTables(x, y, radius) {
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 0; i < game.tables.length; i++) {
+      const table = game.tables[i];
+      const box = tableFootprint(table);
+      if (box.low > TABLE_CLEAR) continue;
+      const ry = table.ry || 0;
+      const c = Math.cos(ry);
+      const s = Math.sin(ry);
+      const dx = x - table.x;
+      const dz = y - table.y;
+      let lx = c * dx - s * dz;
+      let lz = s * dx + c * dz;
+      const nearestX = clamp(lx, box.minX, box.maxX);
+      const nearestZ = clamp(lz, box.minZ, box.maxZ);
+      let ox = lx - nearestX;
+      let oz = lz - nearestZ;
+      const distApart = Math.hypot(ox, oz);
+      if (distApart >= radius) continue;
+      if (distApart > 0.001) {
+        const push = (radius - distApart) / distApart;
+        lx += ox * push;
+        lz += oz * push;
+      } else {
+        const left = lx - box.minX;
+        const right = box.maxX - lx;
+        const back = lz - box.minZ;
+        const front = box.maxZ - lz;
+        const min = Math.min(left, right, back, front);
+        if (min === left) lx = box.minX - radius;
+        else if (min === right) lx = box.maxX + radius;
+        else if (min === back) lz = box.minZ - radius;
+        else lz = box.maxZ + radius;
+      }
+      x = table.x + c * lx + s * lz;
+      y = table.y - s * lx + c * lz;
+    }
+  }
+  return { x: x, y: y };
+}
+
+/**
+ * Nearest quarter-turn, so a table can lie on a face.
+ * @param {number} angle
+ * @returns {number}
+ */
+function nearestFlat(angle) {
+  const step = Math.PI / 2;
+  return Math.round(angle / step) * step;
+}
+
+/**
+ * Once a table slows down, ease it onto the nearest flat face.
+ * @param {object} table
+ * @param {number} dt
+ */
+function restTable(table, dt) {
+  const speed = Math.hypot(table.vrx, table.vry, table.vrz);
+  if (speed > 1.6 || table.h > 2) return;
+  const tx = nearestFlat(table.rx);
+  const tz = nearestFlat(table.rz);
+  table.rx = turnToward(table.rx, tx, dt, 5);
+  table.rz = turnToward(table.rz, tz, dt, 5);
+  table.vrx = 0;
+  table.vrz = 0;
+  table.vry *= Math.exp(-3 * dt);
+  if (Math.abs(wrapAngle(table.rx - tx)) < 0.02 && Math.abs(wrapAngle(table.rz - tz)) < 0.02) {
+    table.rx = tx;
+    table.rz = tz;
+    table.vry = 0;
+  }
+}
+
+/**
+ * Lowest point of the table's box after it tumbles, in model space.
+ * Spin is around the center of the table, then shifted back down.
+ * @param {object} table
+ * @returns {number}
+ */
+function tableBottom(table) {
+  const hx = table.w / 2;
+  const hz = 23;
+  const cx = Math.cos(table.rx);
+  const sx = Math.sin(table.rx);
+  const cz = Math.cos(table.rz);
+  const sz = Math.sin(table.rz);
+  let minY = Infinity;
+  const xs = [-hx, hx];
+  const ys = [-16, 24];
+  const zs = [-hz, hz];
+  for (let i = 0; i < 2; i++) {
+    for (let j = 0; j < 2; j++) {
+      for (let k = 0; k < 2; k++) {
+        const x = xs[i];
+        const y = ys[j];
+        const z = zs[k];
+        const y1 = sz * x + cz * y;
+        const z1 = z;
+        const y2 = cx * y1 - sx * z1;
+        if (y2 + 16 < minY) minY = y2 + 16;
+      }
+    }
+  }
+  return minY;
+}
+
+/**
+ * Height added so the lowest corner sits on the floor, plus any hop.
+ * @param {object} table
+ * @returns {number}
+ */
+function tableLift(table) {
+  return Math.max(0, -tableBottom(table)) + (table.h || 0);
+}
+
+/**
+ * Pace in a small loop, or fly, bounce, and settle after a launch.
+ * @param {object} merchant
+ * @param {number} dt
+ */
+function updateMerchant(merchant, dt) {
+  fleeFromPlayer(merchant);
+  const duckWant = merchant.flee && (merchant.h || 0) < 8 ? 1 : 0;
+  merchant.duck = approach(merchant.duck || 0, duckWant, dt, 12);
+  if (merchant.flee) {
+    merchant.vx = 0;
+    merchant.vy = 0;
+    merchant.h = 0;
+    merchant.vh = 0;
+    merchant.air = false;
+    merchant.yaw = turnToward(merchant.yaw || 0, merchant.face || 0, dt, 8);
+    return;
+  }
+  const moving = merchant.air || merchant.h > 0.5 || merchant.vh !== 0 || Math.abs(merchant.vx) > 12 || Math.abs(merchant.vy) > 12;
+  if (moving) {
+    merchant.vh -= 1500 * dt;
+    merchant.h += merchant.vh * dt;
+    merchant.x += merchant.vx * dt;
+    merchant.y += merchant.vy * dt;
+    merchant.spin += merchant.spinV * dt;
+    if (merchant.x < FLOOR.l + 16) {
+      merchant.x = FLOOR.l + 16;
+      merchant.vx = Math.abs(merchant.vx) * 0.4;
+    }
+    if (merchant.x > FLOOR.r - 16) {
+      merchant.x = FLOOR.r - 16;
+      merchant.vx = -Math.abs(merchant.vx) * 0.4;
+    }
+    if (merchant.y < FLOOR.t + 20) {
+      merchant.y = FLOOR.t + 20;
+      merchant.vy = Math.abs(merchant.vy) * 0.4;
+    }
+    if (merchant.y > FLOOR.b - 12) {
+      merchant.y = FLOOR.b - 12;
+      merchant.vy = -Math.abs(merchant.vy) * 0.4;
+    }
+    if (merchant.h <= 0 && merchant.vh < 0) {
+      merchant.h = 0;
+      merchant.vh = -merchant.vh * 0.28;
+      merchant.vx *= 0.62;
+      merchant.vy *= 0.62;
+      if (merchant.vh < 90) merchant.vh = 0;
+    }
+    if (merchant.h === 0 && merchant.vh === 0) {
+      merchant.vx *= Math.exp(-3.2 * dt);
+      merchant.vy *= Math.exp(-3.2 * dt);
+      merchant.spin *= Math.exp(-10 * dt);
+    }
+    if (merchant.h === 0 && merchant.vh === 0 && Math.abs(merchant.vx) < 12 && Math.abs(merchant.vy) < 12) {
+      merchant.vx = 0;
+      merchant.vy = 0;
+      merchant.air = false;
+      merchant.spin = 0;
+      merchant.spinV = 0;
+      merchant.homeX = merchant.x;
+      merchant.homeY = merchant.y;
+      merchant.phase = 0;
+    }
+    if (Math.abs(merchant.vx) > 8) merchant.yaw = Math.atan2(merchant.vx, merchant.vy);
+    plantMerchant(merchant);
+    return;
+  }
+  merchant.h = 0;
+  merchant.phase += dt;
+  merchant.x = clamp(merchant.homeX + Math.sin(merchant.phase * 1.35) * 16, FLOOR.l + 16, FLOOR.r - 16);
+  merchant.y = clamp(merchant.homeY + Math.sin(merchant.phase * 0.65) * 5, FLOOR.t + 40, FLOOR.b - 6);
+  merchant.facing = Math.cos(merchant.phase * 1.35) >= 0 ? 1 : -1;
+  const pace = merchant.facing > 0 ? 0.55 : -0.55;
+  merchant.yaw = turnToward(merchant.yaw == null ? pace : merchant.yaw, pace, dt, 7);
+  plantMerchant(merchant);
+}
+
+/**
+ * Keep a merchant on the floor from standing inside a table.
+ * @param {object} merchant
+ */
+function plantMerchant(merchant) {
+  if ((merchant.h || 0) > 8) return;
+  const next = separateFromTables(merchant.x, merchant.y, BODY + 2);
+  merchant.x = clamp(next.x, FLOOR.l + 16, FLOOR.r - 16);
+  merchant.y = clamp(next.y, FLOOR.t + 20, FLOOR.b - 12);
+}
+
+/**
+ * Duck in place when the player gets close.
+ * A hard table-flip launch is left alone.
+ * @param {object} merchant
+ */
+function fleeFromPlayer(merchant) {
+  if (!game.player) return;
+  if (merchant.h > 36 || merchant.vh > 240) {
+    merchant.flee = false;
+    return;
+  }
+  const dx = game.player.x - merchant.x;
+  const dy = game.player.y - merchant.y;
+  const distApart = Math.hypot(dx, dy);
+  const panic = 160;
+  if (distApart >= panic) {
+    if (!merchant.flee) return;
+    merchant.flee = false;
+    merchant.vx = 0;
+    merchant.vy = 0;
+    merchant.homeX = merchant.x;
+    merchant.homeY = merchant.y;
+    merchant.phase = 0;
+    return;
+  }
+  const started = !merchant.flee;
+  merchant.flee = true;
+  merchant.vx = 0;
+  merchant.vy = 0;
+  merchant.face = Math.atan2(dx, dy);
+  if (started) playSfx('cower', { volume: 0.4, rate: sfxRate() });
+  if (distApart < 30 && distApart > 0.001) {
+    const gap = 30 - distApart;
+    const nx = -dx / distApart;
+    const ny = -dy / distApart;
+    merchant.x = clamp(merchant.x + nx * gap, FLOOR.l + 16, FLOOR.r - 16);
+    merchant.y = clamp(merchant.y + ny * gap, FLOOR.t + 20, FLOOR.b - 12);
+  }
+}
+
+/**
+ * Gravity for the short-lived coins and scrolls.
+ * @param {number} dt
+ */
+function updateParticles(dt) {
+  for (let i = game.particles.length - 1; i >= 0; i--) {
+    const particle = game.particles[i];
+    particle.vh -= 1400 * dt;
+    particle.h += particle.vh * dt;
+    particle.x += particle.vx * dt;
+    particle.y += particle.vy * dt;
+    particle.rot += particle.vr * dt;
+    particle.age += dt;
+    if (particle.h < 2 && particle.vh < 0) {
+      particle.h = 2;
+      particle.vh *= -0.32;
+      particle.vx *= 0.7;
+      particle.vy *= 0.7;
+    }
+    if (particle.age >= particle.life) game.particles.splice(i, 1);
+  }
+}
+
+/**
+ * Float the "No." bubbles and drop them when they expire.
+ * @param {number} dt
+ */
+function updateBubbles(dt) {
+  for (let i = game.bubbles.length - 1; i >= 0; i--) {
+    const bubble = game.bubbles[i];
+    bubble.age += dt;
+    if (bubble.merchant) {
+      bubble.x = bubble.merchant.x;
+      bubble.y = bubble.merchant.y;
+    }
+    if (bubble.age >= bubble.life) game.bubbles.splice(i, 1);
+  }
+}
+
+/**
+ * Advance and retire table-flip time rewards.
+ * @param {number} dt
+ */
+function updateTimeBursts(dt) {
+  for (let i = game.timeBursts.length - 1; i >= 0; i--) {
+    game.timeBursts[i].age += dt;
+    if (game.timeBursts[i].age >= game.timeBursts[i].life) game.timeBursts.splice(i, 1);
+  }
+}
+
+/**
+ * Reveal, expire, or collect the wave-five sneaker.
+ * @param {number} dt
+ */
+function updateSneakerPickup(dt) {
+  const pickup = game.sneaker;
+  if (!pickup) return;
+  if (pickup.delay > 0) {
+    pickup.delay = Math.max(0, pickup.delay - dt);
+    return;
+  }
+  pickup.time -= dt;
+  if (dist(game.player.x, game.player.y, pickup.x, pickup.y) < 34) {
+    game.player.sneakers = true;
+    game.sneaker = null;
+    game.speedFlash = SPEED_FLASH_TIME;
+    game.shake = 9;
+    playCoinSplash();
+    playSfx('wave', { volume: 0.5, rate: 1.18 });
+    return;
+  }
+  if (pickup.time <= 0) game.sneaker = null;
+}
+
+/**
+ * True once every table in the wave has finished falling.
+ * @returns {boolean}
+ */
+function waveIsClear() {
+  if (game.tables.length === 0) return false;
+  for (const table of game.tables) {
+    if (!table.flipped || table.anim < FLIP_ANIM) return false;
+  }
+  return true;
+}
+
+/**
+ * Bank the wave bonus, advance the wave, and spawn that many tables.
+ */
+function beginNextWave() {
+  game.time += BONUS;
+  game.wave += 1;
+  setCourtSize(game.wave);
+  game.banner = BANNER_TIME;
+  game.bannerSub = game.wave + (game.wave === 1 ? ' table' : ' tables');
+  game.shake = 14;
+  if (game.wave === 6 && !game.sneakerAwarded) {
+    game.sneaker = {
+      x: (FLOOR.l + FLOOR.r) / 2,
+      y: (FLOOR.t + FLOOR.b) / 2,
+      delay: BANNER_TIME,
+      time: 5,
+    };
+    game.sneakerAwarded = true;
+  }
+  spawnWave(game.wave);
+  playSfx('wave', { volume: 0.55, rate: 0.92 });
+}
+
+/**
+ * Step the mode we're in. The clock runs only during play.
+ * @param {number} dt
+ */
+function update(dt) {
+  if (game.mode === 'title') {
+    game.player.bob += dt * 2.2;
+    return;
+  }
+  if (game.mode === 'over') {
+    updateParticles(dt);
+    updateBubbles(dt);
+    if (game.shake > 0) game.shake = Math.max(0, game.shake - dt * 22);
+    return;
+  }
+  updatePlayer(dt);
+  updateSneakerPickup(dt);
+  updateTables(dt);
+  for (const merchant of game.merchants) updateMerchant(merchant, dt);
+  updateParticles(dt);
+  updateBubbles(dt);
+  updateTimeBursts(dt);
+  if (game.speedFlash > 0) game.speedFlash = Math.max(0, game.speedFlash - dt);
+  if (game.shake > 0) game.shake = Math.max(0, game.shake - dt * 22);
+  if (game.banner > 0) game.banner = Math.max(0, game.banner - dt);
+  if (waveIsClear()) beginNextWave();
+  game.time -= dt;
+  if (game.time <= 0) {
+    game.time = 0;
+    endRun();
+  }
+}
+
+/**
+ * Rounded rectangle path. Does not fill or stroke.
+ * @param {number} x
+ * @param {number} y
+ * @param {number} w
+ * @param {number} h
+ * @param {number} r
+ */
+function roundRect(x, y, w, h, r) {
+  const radius = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.arcTo(x + w, y, x + w, y + h, radius);
+  ctx.arcTo(x + w, y + h, x, y + h, radius);
+  ctx.arcTo(x, y + h, x, y, radius);
+  ctx.arcTo(x, y, x + w, y, radius);
+  ctx.closePath();
+}
+
+/**
+ * Fill one line of text.
+ * @param {string} value
+ * @param {number} x
+ * @param {number} y
+ * @param {string} font
+ * @param {string} color
+ * @param {CanvasTextAlign} align
+ * @param {CanvasTextBaseline} baseline
+ */
+function label(value, x, y, font, color, align, baseline) {
+  ctx.font = font;
+  ctx.fillStyle = color;
+  ctx.textAlign = align || 'left';
+  ctx.textBaseline = baseline || 'top';
+  ctx.fillText(value, x, y);
+}
+
+/**
+ * Draw centered text with deliberate letter spacing.
+ * @param {string} value
+ * @param {number} x
+ * @param {number} y
+ * @param {string} font
+ * @param {string} color
+ * @param {number} spacing
+ */
+function trackedLabel(value, x, y, font, color, spacing) {
+  ctx.font = font;
+  ctx.fillStyle = color;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  let width = spacing * Math.max(0, value.length - 1);
+  for (let i = 0; i < value.length; i++) width += ctx.measureText(value[i]).width;
+  let at = x - width / 2;
+  for (let i = 0; i < value.length; i++) {
+    ctx.fillText(value[i], at, y);
+    at += ctx.measureText(value[i]).width + spacing;
+  }
+}
+
+/**
+ * Gold halo crest sitting across the title-card border.
+ * @param {number} x
+ * @param {number} y
+ */
+function drawTitleCrest(x, y) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.strokeStyle = '#f3cf70';
+  ctx.lineCap = 'round';
+  for (let i = 0; i < 8; i++) {
+    const a = i * Math.PI / 4;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * 29, Math.sin(a) * 29);
+    ctx.lineTo(Math.cos(a) * 36, Math.sin(a) * 36);
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#24140e';
+  ctx.beginPath();
+  ctx.arc(0, 0, 26, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.ellipse(0, 1, 18, 6.5, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/**
+ * Dark glass panel used by the three HUD readouts.
+ * @param {number} x
+ * @param {number} y
+ * @param {number} w
+ * @param {number} h
+ */
+function hudPanel(x, y, w, h) {
+  ctx.fillStyle = 'rgba(35, 18, 12, 0.76)';
+  roundRect(x, y, w, h, 12);
+  ctx.fill();
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = 'rgba(255, 229, 162, 0.72)';
+  ctx.stroke();
+}
+
+/**
+ * Draw one local Lucide icon in a HUD panel.
+ * @param {'table'|'wave'|'time'} kind
+ * @param {number} x
+ * @param {number} y
+ */
+function drawHudIcon(kind, x, y) {
+  const image = HUD_ICONS[kind];
+  if (!image || !image.complete || !image.naturalWidth) return;
+  ctx.drawImage(image, x - 11, y - 11, 22, 22);
+}
+
+/**
+ * Spinning gold blades behind a wave number.
+ * @param {number} spin
+ */
+function drawBannerRays(spin) {
+  ctx.save();
+  ctx.rotate(spin);
+  for (let i = 0; i < 18; i++) {
+    ctx.rotate(Math.PI / 9);
+    ctx.fillStyle = i % 2 === 0 ? 'rgba(226, 180, 74, 0.42)' : 'rgba(255, 244, 214, 0.16)';
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(22, 640);
+    ctx.lineTo(-22, 640);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+/**
+ * Full-screen wave slam. Fades out while play continues.
+ */
+function drawBanner() {
+  if (game.banner <= 0) return;
+  const age = BANNER_TIME - game.banner;
+  let alpha = 1;
+  if (age < 0.08) alpha = age / 0.08;
+  if (age > 1.15) alpha = Math.max(0, (BANNER_TIME - age) / (BANNER_TIME - 1.15));
+  const punch = age < 0.22 ? 1.14 - (age / 0.22) * 0.14 : 1;
+  const bounce = age >= 0.22 && age < 0.4 ? 1 + Math.sin(((age - 0.22) / 0.18) * Math.PI) * 0.06 : punch;
+
+  ctx.save();
+  ctx.globalAlpha = clamp(alpha, 0, 1) * 0.78;
+  const dim = ctx.createRadialGradient(W / 2, H / 2, 40, W / 2, H / 2, 520);
+  dim.addColorStop(0, 'rgba(48, 18, 10, 0.2)');
+  dim.addColorStop(1, 'rgba(12, 6, 4, 0.92)');
+  ctx.fillStyle = dim;
+  ctx.fillRect(0, 0, W, H);
+  ctx.restore();
+
+  if (age < 0.16) {
+    ctx.save();
+    ctx.globalAlpha = (1 - age / 0.16) * 0.9;
+    ctx.fillStyle = '#fff4cc';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+
+  const ring = Math.min(age / 0.5, 1);
+  if (ring < 1) {
+    ctx.save();
+    ctx.globalAlpha = (1 - ring) * clamp(alpha, 0, 1);
+    ctx.strokeStyle = '#ffe7a8';
+    ctx.lineWidth = 10 * (1 - ring);
+    ctx.beginPath();
+    ctx.arc(W / 2, H / 2 + 8, 30 + ring * 460, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  ctx.save();
+  ctx.globalAlpha = clamp(alpha, 0, 1);
+  ctx.translate(W / 2, H / 2 + 6);
+  ctx.scale(bounce, bounce);
+  drawBannerRays(performance.now() / 700);
+  ctx.fillStyle = 'rgba(48, 18, 12, 0.88)';
+  ctx.beginPath();
+  ctx.arc(0, 16, 168, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#e2b44a';
+  ctx.lineWidth = 8;
+  ctx.beginPath();
+  ctx.arc(0, 16, 158, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#fff1c2';
+  ctx.beginPath();
+  ctx.arc(0, 16, 174, 0, Math.PI * 2);
+  ctx.stroke();
+  label('WAVE', 0, -58, '700 36px ' + NUM, '#ffe7a8', 'center', 'middle');
+  ctx.shadowColor = 'rgba(62, 18, 8, 0.45)';
+  ctx.shadowOffsetY = 4;
+  label(String(game.wave), 0, 22, '700 112px ' + NUM, '#fff8ea', 'center', 'middle');
+  ctx.shadowOffsetY = 0;
+  label(game.bannerSub, 0, 96, '700 22px ' + NUM, '#fff6e8', 'center', 'middle');
+  ctx.restore();
+}
+
+/**
+ * Score, clock, and wave number during a run.
+ */
+function drawHud() {
+  ctx.save();
+  const top = 14;
+  hudPanel(18, top, 190, 58);
+  hudPanel(W / 2 - 95, top, 190, 58);
+  hudPanel(W - 208, top, 190, 58);
+  drawHudIcon('table', 42, top + 31);
+  drawHudIcon('wave', W / 2 - 70, top + 31);
+  drawHudIcon('time', W - 182, top + 31);
+
+  ctx.shadowColor = 'rgba(20, 8, 4, 0.55)';
+  ctx.shadowOffsetY = 2;
+  const score = String(game.score);
+  let tablesLeft = 0;
+  for (let i = 0; i < game.tables.length; i++) {
+    if (!game.tables[i].flipped) tablesLeft += 1;
+  }
+  label('TABLES FLIPPED', 62, top + 10, '700 10px ' + FONT, '#e9c878', 'left', 'top');
+  label(score, 62, top + 25, '700 26px ' + NUM, '#fff9ed', 'left', 'top');
+
+  const urgent = game.time < 10;
+  const color = urgent ? '#ff6c50' : '#fff6e8';
+  if (urgent) ctx.globalAlpha = 0.55 + 0.45 * Math.abs(Math.sin(performance.now() / 140));
+  label('TIME', W - 38, top + 10, '700 11px ' + FONT, '#e9c878', 'right', 'top');
+  label(Math.max(0, game.time).toFixed(1), W - 38, top + 25, '700 25px ' + NUM, color, 'right', 'top');
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = 'rgba(255, 229, 162, 0.32)';
+  ctx.fillRect(W / 2 + 5, top + 10, 1, 38);
+  label('WAVE', W / 2 - 30, top + 10, '700 10px ' + FONT, '#e9c878', 'center', 'top');
+  label(String(game.wave), W / 2 - 30, top + 25, '700 24px ' + NUM, '#fff9ed', 'center', 'top');
+  label('LEFT', W / 2 + 45, top + 10, '700 10px ' + FONT, '#e9c878', 'center', 'top');
+  label(String(tablesLeft), W / 2 + 45, top + 25, '700 24px ' + NUM, '#fff9ed', 'center', 'top');
+  ctx.restore();
+}
+
+/**
+ * Cinematic title treatment laid directly over the temple.
+ */
+function drawTitleScreen() {
+  const cx = W / 2;
+  const logoWash = ctx.createRadialGradient(cx, 180, 30, cx, 205, 330);
+  logoWash.addColorStop(0, 'rgba(24, 12, 8, 0.72)');
+  logoWash.addColorStop(0.62, 'rgba(24, 12, 8, 0.38)');
+  logoWash.addColorStop(1, 'rgba(24, 12, 8, 0)');
+  ctx.fillStyle = logoWash;
+  ctx.fillRect(130, 16, 700, 440);
+
+  drawTitleCrest(cx, 55);
+  ctx.save();
+  ctx.shadowColor = 'rgba(18, 7, 3, 0.95)';
+  ctx.shadowBlur = 18;
+  ctx.shadowOffsetY = 5;
+  trackedLabel('UNTITLED', cx, 106, '700 15px ' + FONT, '#f1cf75', 5);
+  ctx.font = '76px ' + HEAD;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(39, 18, 10, 0.72)';
+  ctx.strokeText('Messiah', cx, 155);
+  ctx.fillStyle = '#fff9ee';
+  ctx.fillText('Messiah', cx, 155);
+  trackedLabel('GAME', cx, 203, '700 18px ' + FONT, '#f1cf75', 9);
+  ctx.restore();
+
+  ctx.strokeStyle = 'rgba(235, 192, 85, 0.82)';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(cx - 174, 239);
+  ctx.lineTo(cx - 20, 239);
+  ctx.moveTo(cx + 20, 239);
+  ctx.lineTo(cx + 174, 239);
+  ctx.stroke();
+  ctx.save();
+  ctx.translate(cx, 239);
+  ctx.rotate(Math.PI / 4);
+  ctx.fillStyle = '#e2b44a';
+  ctx.fillRect(-4, -4, 8, 8);
+  ctx.restore();
+
+  trackedLabel('A SHORT UNPLEASANTNESS IN THE TEMPLE COURT', cx, 262, '700 10px ' + FONT, '#e0bf70', 0.8);
+  ctx.save();
+  ctx.shadowColor = 'rgba(20, 8, 4, 0.9)';
+  ctx.shadowBlur = 8;
+  label('Flip every table. Then do it again, faster.', cx, 288, '18px ' + FONT, '#fff8eb', 'center', 'middle');
+  ctx.restore();
+
+  ctx.fillStyle = 'rgba(31, 16, 11, 0.72)';
+  roundRect(cx - 74, 315, 148, 36, 18);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(243, 207, 112, 0.62)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  label('BEST', cx - 9, 333, '700 9px ' + FONT, '#d8b96f', 'right', 'middle');
+  label(String(game.best), cx + 7, 333, '700 19px ' + NUM, '#fff8e8', 'left', 'middle');
+
+  const pulse = 0.5 + 0.5 * Math.abs(Math.sin(performance.now() / 420));
+  const buttonY = 382;
+  const buttonFill = ctx.createLinearGradient(0, buttonY, 0, buttonY + 52);
+  buttonFill.addColorStop(0, '#f5d36e');
+  buttonFill.addColorStop(1, '#cc9b2f');
+  ctx.save();
+  ctx.shadowColor = 'rgba(255, 215, 92, ' + (0.28 + pulse * 0.38) + ')';
+  ctx.shadowBlur = 8 + pulse * 14;
+  ctx.fillStyle = buttonFill;
+  roundRect(cx - 142, buttonY, 284, 52, 26);
+  ctx.fill();
+  ctx.restore();
+  const play = HUD_ICONS.play;
+  if (play.complete && play.naturalWidth) ctx.drawImage(play, cx - 101, buttonY + 15, 22, 22);
+  label('START GAME', cx + 4, buttonY + 20, '700 14px ' + FONT, '#2a160e', 'center', 'middle');
+  trackedLabel('ENTER · SPACE · CLICK', cx + 4, buttonY + 37, '700 8px ' + FONT, '#5a391c', 0.7);
+}
+
+/**
+ * Title and game-over cards, drawn over the court.
+ */
+function drawOverlay() {
+  const shade = ctx.createRadialGradient(W / 2, H * 0.42, 80, W / 2, H * 0.5, 620);
+  shade.addColorStop(0, 'rgba(28, 14, 8, 0.18)');
+  shade.addColorStop(1, 'rgba(18, 8, 5, 0.62)');
+  ctx.fillStyle = shade;
+  ctx.fillRect(0, 0, W, H);
+
+  if (game.mode === 'title') {
+    drawTitleScreen();
+    return;
+  }
+
+  const panelW = 620;
+  const panelH = 286;
+  const x = (W - panelW) / 2;
+  const y = 72;
+  const panelFill = ctx.createLinearGradient(0, y, 0, y + panelH);
+  panelFill.addColorStop(0, 'rgba(28, 15, 11, 0.98)');
+  panelFill.addColorStop(0.55, 'rgba(42, 22, 14, 0.96)');
+  panelFill.addColorStop(1, 'rgba(24, 13, 10, 0.98)');
+  ctx.save();
+  ctx.shadowColor = 'rgba(10, 4, 2, 0.7)';
+  ctx.shadowBlur = 28;
+  ctx.shadowOffsetY = 12;
+  ctx.fillStyle = panelFill;
+  roundRect(x, y, panelW, panelH, 20);
+  ctx.fill();
+  ctx.restore();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#e2b44a';
+  roundRect(x, y, panelW, panelH, 20);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(255, 241, 194, 0.52)';
+  roundRect(x + 8, y + 8, panelW - 16, panelH - 16, 14);
+  ctx.stroke();
+
+  label("Time's up", W / 2, y + 24, '32px ' + HEAD, '#f2d48a', 'center', 'top');
+  ctx.fillStyle = '#e2b44a';
+  ctx.fillRect(W / 2 - 42, y + 70, 84, 2);
+  label(String(game.score), W / 2, y + 78, '700 64px ' + NUM, '#fff6e8', 'center', 'top');
+  label(game.score === 1 ? 'TABLE FLIPPED' : 'TABLES FLIPPED', W / 2, y + 148, '700 11px ' + FONT, '#e9c878', 'center', 'top');
+  label(game.bested ? 'NEW BEST  ' + game.best : 'BEST  ' + game.best, W / 2, y + 178, '700 18px ' + NUM, '#f2d48a', 'center', 'top');
+  const pulse = 0.45 + 0.55 * Math.abs(Math.sin(performance.now() / 420));
+  ctx.globalAlpha = pulse;
+  ctx.fillStyle = '#e2b44a';
+  roundRect(W / 2 - 122, y + 228, 244, 36, 18);
+  ctx.fill();
+  label('PLAY AGAIN', W / 2, y + 246, '700 12px ' + FONT, '#2a160e', 'center', 'middle');
+  ctx.globalAlpha = 1;
+}
+
+/** Camera basis and view-projection for this frame. */
+let cam = null;
+/** View-projection matrix, column-major. */
+let vp = new Float32Array(16);
+let glFailed = false;
+let prog = null;
+let locMvp = null;
+let locLight = null;
+let meshBuf = null;
+/** Triangle soup built each frame: x,y,z,r,g,b. */
+const scratch = [];
+/** Current model matrix. */
+let model = null;
+const modelStack = [];
+const colorCache = {};
+const LIGHT = [0.22, 0.9, 0.38];
+
+const VS_SRC = [
+  'attribute vec3 aPos;',
+  'attribute vec3 aNormal;',
+  'attribute vec3 aColor;',
+  'uniform mat4 uMvp;',
+  'varying vec3 vNormal;',
+  'varying vec3 vColor;',
+  'void main() {',
+  '  gl_Position = uMvp * vec4(aPos, 1.0);',
+  '  vNormal = aNormal;',
+  '  vColor = aColor;',
+  '}',
+].join('\n');
+
+const FS_SRC = [
+  'precision mediump float;',
+  'varying vec3 vNormal;',
+  'varying vec3 vColor;',
+  'uniform vec3 uLight;',
+  'void main() {',
+  '  float len = length(vNormal);',
+  '  if (len < 0.001) {',
+  '    gl_FragColor = vec4(vColor, 1.0);',
+  '    return;',
+  '  }',
+  '  float nd = max(0.0, dot(vNormal / len, uLight));',
+  '  float band = 0.72;',
+  '  if (nd > 0.38) band = 0.88;',
+  '  if (nd > 0.78) band = 1.0;',
+  '  gl_FragColor = vec4(vColor * band, 1.0);',
+  '}',
+].join('\n');
+
+/**
+ * Identity matrix, column-major.
+ * @returns {Float32Array}
+ */
+function ident() {
+  const m = new Float32Array(16);
+  m[0] = m[5] = m[10] = m[15] = 1;
+  return m;
+}
+
+/**
+ * Multiply two column-major matrices.
+ * @param {Float32Array} a
+ * @param {Float32Array} b
+ * @returns {Float32Array}
+ */
+function mul(a, b) {
+  const o = new Float32Array(16);
+  for (let c = 0; c < 4; c++) {
+    for (let r = 0; r < 4; r++) {
+      o[c * 4 + r] =
+        a[r] * b[c * 4] +
+        a[4 + r] * b[c * 4 + 1] +
+        a[8 + r] * b[c * 4 + 2] +
+        a[12 + r] * b[c * 4 + 3];
+    }
+  }
+  return o;
+}
+
+/**
+ * Translation matrix.
+ * @param {number} x
+ * @param {number} y
+ * @param {number} z
+ * @returns {Float32Array}
+ */
+function matTranslate(x, y, z) {
+  const m = ident();
+  m[12] = x;
+  m[13] = y;
+  m[14] = z;
+  return m;
+}
+
+/**
+ * Scale from the local origin. Feet stay put when this sits above the ground.
+ * @param {number} x
+ * @param {number} y
+ * @param {number} z
+ * @returns {Float32Array}
+ */
+function matScale(x, y, z) {
+  const m = ident();
+  m[0] = x;
+  m[5] = y;
+  m[10] = z;
+  return m;
+}
+
+/**
+ * Rotation around Y, column-major.
+ * @param {number} a Radians.
+ * @returns {Float32Array}
+ */
+function matRotateY(a) {
+  const c = Math.cos(a);
+  const s = Math.sin(a);
+  const m = ident();
+  m[0] = c;
+  m[2] = -s;
+  m[8] = s;
+  m[10] = c;
+  return m;
+}
+
+/**
+ * Rotation around X, column-major.
+ * @param {number} a Radians.
+ * @returns {Float32Array}
+ */
+function matRotateX(a) {
+  const c = Math.cos(a);
+  const s = Math.sin(a);
+  const m = ident();
+  m[5] = c;
+  m[6] = s;
+  m[9] = -s;
+  m[10] = c;
+  return m;
+}
+
+/**
+ * Rotation around Z, column-major.
+ * @param {number} a Radians.
+ * @returns {Float32Array}
+ */
+function matRotateZ(a) {
+  const c = Math.cos(a);
+  const s = Math.sin(a);
+  const m = ident();
+  m[0] = c;
+  m[1] = s;
+  m[4] = -s;
+  m[5] = c;
+  return m;
+}
+
+/**
+ * Push a copy of the model matrix.
+ */
+function pushModel() {
+  modelStack.push(model);
+  model = model.slice();
+}
+
+/**
+ * Restore the model matrix.
+ */
+function popModel() {
+  model = modelStack.pop() || ident();
+}
+
+/**
+ * Multiply a matrix onto the model.
+ * @param {Float32Array} mat
+ */
+function apply(mat) {
+  model = mul(model, mat);
+}
+
+/**
+ * Parse a #rrggbb color, cached.
+ * @param {string} hexColor
+ * @returns {number[]}
+ */
+function rgb(hexColor) {
+  const cached = colorCache[hexColor];
+  if (cached) return cached;
+  const n = hexColor.charAt(0) === '#' ? hexColor.slice(1) : hexColor;
+  const out = [
+    parseInt(n.slice(0, 2), 16) / 255,
+    parseInt(n.slice(2, 4), 16) / 255,
+    parseInt(n.slice(4, 6), 16) / 255,
+  ];
+  colorCache[hexColor] = out;
+  return out;
+}
+
+/**
+ * Transform a local point by the model matrix.
+ * @param {number[]} p
+ * @returns {number[]}
+ */
+function xform(p) {
+  const x = p[0];
+  const y = p[1];
+  const z = p[2];
+  const m = model;
+  return [
+    m[0] * x + m[4] * y + m[8] * z + m[12],
+    m[1] * x + m[5] * y + m[9] * z + m[13],
+    m[2] * x + m[6] * y + m[10] * z + m[14],
+  ];
+}
+
+/** Sky, clouds, and shadows skip lighting. */
+let unlit = false;
+
+/**
+ * Rotate a direction by the model matrix, ignoring translation.
+ * @param {number[]} n
+ * @returns {number[]}
+ */
+function xformDir(n) {
+  const m = model;
+  return [
+    m[0] * n[0] + m[4] * n[1] + m[8] * n[2],
+    m[1] * n[0] + m[5] * n[1] + m[9] * n[2],
+    m[2] * n[0] + m[6] * n[1] + m[10] * n[2],
+  ];
+}
+
+/**
+ * Write a world-space vertex. A zero normal stays unshaded, for the sky.
+ * @param {number[]} p
+ * @param {number[]} n
+ * @param {number[]} col
+ */
+function pushWorld(p, n, col) {
+  if (unlit) {
+    scratch.push(p[0], p[1], p[2], 0, 0, 0, col[0], col[1], col[2]);
+    return;
+  }
+  const len = Math.hypot(n[0], n[1], n[2]) || 1;
+  scratch.push(p[0], p[1], p[2], n[0] / len, n[1] / len, n[2] / len, col[0], col[1], col[2]);
+}
+
+/**
+ * Emit one triangle from local-space corners, flat across the face.
+ * @param {number[]} a
+ * @param {number[]} b
+ * @param {number[]} c
+ * @param {number[]} rgbv
+ */
+function localTri(a, b, c, rgbv) {
+  const pa = xform(a);
+  const pb = xform(b);
+  const pc = xform(c);
+  const ux = pb[0] - pa[0];
+  const uy = pb[1] - pa[1];
+  const uz = pb[2] - pa[2];
+  const vx = pc[0] - pa[0];
+  const vy = pc[1] - pa[1];
+  const vz = pc[2] - pa[2];
+  const normal = [uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx];
+  pushWorld(pa, normal, rgbv);
+  pushWorld(pb, normal, rgbv);
+  pushWorld(pc, normal, rgbv);
+}
+
+/**
+ * Emit one smoothly shaded vertex.
+ * @param {number[]} p Local position.
+ * @param {number[]} n Local normal.
+ * @param {number[]} rgbv
+ */
+function emitSmooth(p, n, rgbv) {
+  pushWorld(xform(p), xformDir(n), rgbv);
+}
+
+/**
+ * Axis-aligned box centered on the local origin.
+ * @param {number} w
+ * @param {number} h
+ * @param {number} d
+ * @param {string} color
+ */
+function cube(w, h, d, color) {
+  const rgbv = rgb(color);
+  const x = w / 2;
+  const y = h / 2;
+  const z = d / 2;
+  const v = [
+    [-x, -y, -z], [x, -y, -z], [x, y, -z], [-x, y, -z],
+    [-x, -y, z], [x, -y, z], [x, y, z], [-x, y, z],
+  ];
+  const faces = [
+    [4, 5, 6, 7],
+    [1, 0, 3, 2],
+    [5, 1, 2, 6],
+    [0, 4, 7, 3],
+    [3, 7, 6, 2],
+    [0, 1, 5, 4],
+  ];
+  for (let i = 0; i < faces.length; i++) {
+    const f = faces[i];
+    localTri(v[f[0]], v[f[1]], v[f[2]], rgbv);
+    localTri(v[f[0]], v[f[2]], v[f[3]], rgbv);
+  }
+}
+
+/**
+ * Vertical prism centered on the local origin. Used for columns, coins, and the halo.
+ * @param {number} radius
+ * @param {number} height
+ * @param {number} sides
+ * @param {string} color
+ */
+function prism(radius, height, sides, color) {
+  const rgbv = rgb(color);
+  const hy = height / 2;
+  const top = [];
+  const bot = [];
+  for (let i = 0; i < sides; i++) {
+    const a = (i / sides) * Math.PI * 2;
+    const cx = Math.cos(a) * radius;
+    const cz = Math.sin(a) * radius;
+    top.push([cx, hy, cz]);
+    bot.push([cx, -hy, cz]);
+  }
+  for (let i = 1; i < sides - 1; i++) {
+    localTri(top[0], top[i], top[i + 1], rgbv);
+    localTri(bot[0], bot[i + 1], bot[i], rgbv);
+  }
+  for (let i = 0; i < sides; i++) {
+    const j = (i + 1) % sides;
+    const a0 = (i / sides) * Math.PI * 2;
+    const a1 = (j / sides) * Math.PI * 2;
+    const n0 = [Math.cos(a0), 0, Math.sin(a0)];
+    const n1 = [Math.cos(a1), 0, Math.sin(a1)];
+    emitSmooth(bot[i], n0, rgbv);
+    emitSmooth(bot[j], n1, rgbv);
+    emitSmooth(top[j], n1, rgbv);
+    emitSmooth(bot[i], n0, rgbv);
+    emitSmooth(top[j], n1, rgbv);
+    emitSmooth(top[i], n0, rgbv);
+  }
+}
+
+/**
+ * Emit a triangle whose winding faces away from the local origin.
+ * @param {number[]} a
+ * @param {number[]} b
+ * @param {number[]} c
+ * @param {number[]} rgbv
+ */
+function emitOutward(a, b, c, rgbv) {
+  const ux = b[0] - a[0];
+  const uy = b[1] - a[1];
+  const uz = b[2] - a[2];
+  const vx = c[0] - a[0];
+  const vy = c[1] - a[1];
+  const vz = c[2] - a[2];
+  const nx = uy * vz - uz * vy;
+  const ny = uz * vx - ux * vz;
+  const nz = ux * vy - uy * vx;
+  const mx = (a[0] + b[0] + c[0]) / 3;
+  const my = (a[1] + b[1] + c[1]) / 3;
+  const mz = (a[2] + b[2] + c[2]) / 3;
+  if (nx * mx + ny * my + nz * mz < 0) localTri(a, c, b, rgbv);
+  else localTri(a, b, c, rgbv);
+}
+
+/**
+ * Smooth ellipsoid centered on the local origin.
+ * @param {number} rx
+ * @param {number} ry
+ * @param {number} rz
+ * @param {string} color
+ */
+function ellipsoid(rx, ry, rz, color) {
+  const rgbv = rgb(color);
+  const stacks = 8;
+  const slices = 18;
+  /**
+   * One point on the ellipsoid and its outward normal.
+   * @param {number} i
+   * @param {number} j
+   * @returns {{p:number[],n:number[]}}
+   */
+  function point(i, j) {
+    const v = (i / stacks) * Math.PI;
+    const u = (j / slices) * Math.PI * 2;
+    const sy = Math.sin(v);
+    const cy = Math.cos(v);
+    const p = [Math.cos(u) * sy * rx, cy * ry, Math.sin(u) * sy * rz];
+    return { p: p, n: [p[0] / (rx * rx) || 0, p[1] / (ry * ry) || 0, p[2] / (rz * rz) || 0] };
+  }
+  for (let i = 0; i < stacks; i++) {
+    for (let j = 0; j < slices; j++) {
+      const a = point(i, j);
+      const b = point(i, j + 1);
+      const c = point(i + 1, j + 1);
+      const d = point(i + 1, j);
+      emitSmooth(a.p, a.n, rgbv);
+      emitSmooth(b.p, b.n, rgbv);
+      emitSmooth(c.p, c.n, rgbv);
+      emitSmooth(a.p, a.n, rgbv);
+      emitSmooth(c.p, c.n, rgbv);
+      emitSmooth(d.p, d.n, rgbv);
+    }
+  }
+}
+
+/**
+ * Rounded frustum, wider at the bottom. Centered on the local origin.
+ * @param {number} rBot
+ * @param {number} rTop
+ * @param {number} height
+ * @param {number} sides
+ * @param {string} color
+ */
+function taper(rBot, rTop, height, sides, color) {
+  const rgbv = rgb(color);
+  const hy = height / 2;
+  const top = [];
+  const bot = [];
+  for (let i = 0; i < sides; i++) {
+    const a = (i / sides) * Math.PI * 2;
+    const c = Math.cos(a);
+    const s = Math.sin(a);
+    top.push([c * rTop, hy, s * rTop]);
+    bot.push([c * rBot, -hy, s * rBot]);
+  }
+  for (let i = 1; i < sides - 1; i++) {
+    emitOutward(top[0], top[i], top[i + 1], rgbv);
+    emitOutward(bot[0], bot[i + 1], bot[i], rgbv);
+  }
+  for (let i = 0; i < sides; i++) {
+    const j = (i + 1) % sides;
+    const a0 = (i / sides) * Math.PI * 2;
+    const a1 = (j / sides) * Math.PI * 2;
+    const dr = (rTop - rBot) / height;
+    const n0 = [Math.cos(a0), -dr, Math.sin(a0)];
+    const n1 = [Math.cos(a1), -dr, Math.sin(a1)];
+    emitSmooth(bot[i], n0, rgbv);
+    emitSmooth(bot[j], n1, rgbv);
+    emitSmooth(top[j], n1, rgbv);
+    emitSmooth(bot[i], n0, rgbv);
+    emitSmooth(top[j], n1, rgbv);
+    emitSmooth(top[i], n0, rgbv);
+  }
+}
+
+/**
+ * Compile shaders and the mesh program.
+ */
+function initGL() {
+  gl = view.getContext('webgl', { antialias: true, alpha: false });
+  if (!gl) {
+    glFailed = true;
+    return;
+  }
+  /**
+   * Compile one shader.
+   * @param {number} type
+   * @param {string} src
+   * @returns {WebGLShader}
+   */
+  function shader(type, src) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    return sh;
+  }
+  const vs = shader(gl.VERTEX_SHADER, VS_SRC);
+  const fs = shader(gl.FRAGMENT_SHADER, FS_SRC);
+  prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.bindAttribLocation(prog, 0, 'aPos');
+  gl.bindAttribLocation(prog, 1, 'aNormal');
+  gl.bindAttribLocation(prog, 2, 'aColor');
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    glFailed = true;
+    return;
+  }
+  locMvp = gl.getUniformLocation(prog, 'uMvp');
+  locLight = gl.getUniformLocation(prog, 'uLight');
+  meshBuf = gl.createBuffer();
+  gl.enable(gl.DEPTH_TEST);
+  gl.clearColor(0.42, 0.74, 0.9, 1);
+  const llen = Math.hypot(LIGHT[0], LIGHT[1], LIGHT[2]);
+  LIGHT[0] /= llen;
+  LIGHT[1] /= llen;
+  LIGHT[2] /= llen;
+}
+
+/**
+ * How far the shoulder camera can sit before it leaves the court.
+ * 1 is the full distance. Smaller means it has to move in.
+ * @param {number} ex
+ * @param {number} ez
+ * @param {number} px
+ * @param {number} pz
+ * @returns {number}
+ */
+function cameraRoomScale(ex, ez, px, pz) {
+  const minX = FLOOR.l - 22;
+  const maxX = FLOOR.r + 22;
+  const minZ = FLOOR.t - 32;
+  const maxZ = FLOOR.b + 80;
+  let scale = 1;
+  const ox = ex - px;
+  const oz = ez - pz;
+  if (ox > 1) scale = Math.min(scale, (maxX - px) / ox);
+  else if (ox < -1) scale = Math.min(scale, (minX - px) / ox);
+  if (oz > 1) scale = Math.min(scale, (maxZ - pz) / oz);
+  else if (oz < -1) scale = Math.min(scale, (minZ - pz) / oz);
+  return clamp(scale, 0.34, 1);
+}
+
+/**
+ * Sit behind the player's right shoulder and look ahead of them.
+ * The rig eases after the player, and the distance eases when a wall gets close.
+ */
+function updateCamera() {
+  const p = game.player;
+  const now = performance.now();
+  const dt = camStamp ? Math.min(0.05, (now - camStamp) / 1000) : 0.016;
+  camStamp = now;
+  const yawGap = wrapAngle(p.yaw - camYaw);
+  camYaw = wrapAngle(camYaw + yawGap * (1 - Math.exp(-CAM_YAW * dt)));
+  const follow = 1 - Math.exp(-CAM_FOLLOW * dt);
+  camX += (p.x - camX) * follow;
+  camZ += (p.y - camZ) * follow;
+
+  const shake = game.shake > 0.2 ? game.shake : 0;
+  const k = now / 32;
+  const hx = Math.sin(camYaw);
+  const hz = Math.cos(camYaw);
+  const sx = -hz;
+  const sz = hx;
+  const ox = -hx * CAM_BACK + sx * CAM_SHOULDER;
+  const oz = -hz * CAM_BACK + sz * CAM_SHOULDER;
+  const want = cameraRoomScale(camX + ox, camZ + oz, camX, camZ);
+  const rate = want < camPull ? 9 : 3.2;
+  camPull += (want - camPull) * (1 - Math.exp(-rate * dt));
+  const ex = camX + ox * camPull + Math.sin(k * 1.7) * shake;
+  const ez = camZ + oz * camPull + Math.cos(k * 1.3) * shake * 0.35;
+  const ey = GROUND + CAM_HEIGHT * (0.7 + 0.3 * camPull) + Math.cos(k * 2.1) * shake * 0.25;
+  const tx = camX + hx * CAM_AHEAD + sx * 14;
+  const ty = GROUND + CAM_LOOK_H;
+  const tz = camZ + hz * CAM_AHEAD + sz * 14;
+  let fx = tx - ex;
+  let fy = ty - ey;
+  let fz = tz - ez;
+  const fl = Math.hypot(fx, fy, fz) || 1;
+  fx /= fl;
+  fy /= fl;
+  fz /= fl;
+  let rx = -fz;
+  let ry = 0;
+  let rz = fx;
+  const rl = Math.hypot(rx, ry, rz) || 1;
+  rx /= rl;
+  ry /= rl;
+  rz /= rl;
+  const ux = ry * fz - rz * fy;
+  const uy = rz * fx - rx * fz;
+  const uz = rx * fy - ry * fx;
+  cam = { ex: ex, ey: ey, ez: ez, fx: fx, fy: fy, fz: fz, rx: rx, ry: ry, rz: rz, ux: ux, uy: uy, uz: uz };
+
+  const viewM = ident();
+  viewM[0] = rx;
+  viewM[1] = ux;
+  viewM[2] = -fx;
+  viewM[4] = ry;
+  viewM[5] = uy;
+  viewM[6] = -fy;
+  viewM[8] = rz;
+  viewM[9] = uz;
+  viewM[10] = -fz;
+  viewM[12] = -(rx * ex + ry * ey + rz * ez);
+  viewM[13] = -(ux * ex + uy * ey + uz * ez);
+  viewM[14] = fx * ex + fy * ey + fz * ez;
+
+  const f = 1 / Math.tan(CAM_FOV / 2);
+  const aspect = W / H;
+  const near = 12;
+  const far = 5000;
+  const proj = ident();
+  proj[0] = f / aspect;
+  proj[5] = f;
+  proj[10] = (far + near) / (near - far);
+  proj[11] = -1;
+  proj[14] = (2 * far * near) / (near - far);
+  proj[15] = 0;
+  vp = mul(proj, viewM);
+}
+
+/**
+ * Direction from the camera through a logical screen pixel. Not normalized.
+ * @param {number} sx
+ * @param {number} sy
+ * @returns {{dx:number,dy:number,dz:number}}
+ */
+function aimRay(sx, sy) {
+  const ndcX = (sx / W) * 2 - 1;
+  const ndcY = 1 - (sy / H) * 2;
+  const spread = Math.tan(CAM_FOV / 2);
+  const aspect = W / H;
+  return {
+    dx: cam.fx + cam.rx * ndcX * spread * aspect + cam.ux * ndcY * spread,
+    dy: cam.fy + cam.ry * ndcX * spread * aspect + cam.uy * ndcY * spread,
+    dz: cam.fz + cam.rz * ndcX * spread * aspect + cam.uz * ndcY * spread,
+  };
+}
+
+/**
+ * Intersect the pointer ray with the floor.
+ * @param {number} sx
+ * @param {number} sy
+ * @returns {{x:number,y:number}}
+ */
+function floorAt(sx, sy) {
+  const ray = aimRay(sx, sy);
+  if (ray.dy >= -0.0001) {
+    const p = game.player;
+    return {
+      x: p.x + Math.sin(p.yaw) * 280,
+      y: p.y + Math.cos(p.yaw) * 280,
+    };
+  }
+  const t = (GROUND - cam.ey) / ray.dy;
+  return { x: cam.ex + ray.dx * t, y: cam.ez + ray.dz * t };
+}
+
+/**
+ * Upright table the click ray actually passes through.
+ * The floor point under a tabletop is far ahead in this camera, so clicks use the ray.
+ * @param {number} sx
+ * @param {number} sy
+ * @returns {object | null}
+ */
+function tableAlongRay(sx, sy) {
+  if (!cam) return null;
+  const ray = aimRay(sx, sy);
+  const dd = ray.dx * ray.dx + ray.dy * ray.dy + ray.dz * ray.dz;
+  let best = null;
+  let bestT = Infinity;
+  for (let i = 0; i < game.tables.length; i++) {
+    const table = game.tables[i];
+    const radius = Math.max(56, table.w * 0.7);
+    const ox = cam.ex - table.x;
+    const oy = cam.ey - (GROUND + 18 + (table.h || 0));
+    const oz = cam.ez - table.y;
+    const b = ox * ray.dx + oy * ray.dy + oz * ray.dz;
+    const c = ox * ox + oy * oy + oz * oz - radius * radius;
+    const disc = b * b - dd * c;
+    if (disc < 0) continue;
+    const t = (-b - Math.sqrt(disc)) / dd;
+    if (t < 0 || t >= bestT) continue;
+    bestT = t;
+    best = table;
+  }
+  return best;
+}
+
+/**
+ * Project a world point to logical screen pixels.
+ * @param {number} x
+ * @param {number} y
+ * @param {number} z
+ * @returns {{x:number,y:number} | null}
+ */
+function projectToScreen(x, y, z) {
+  const cx = vp[0] * x + vp[4] * y + vp[8] * z + vp[12];
+  const cy = vp[1] * x + vp[5] * y + vp[9] * z + vp[13];
+  const cw = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
+  if (cw <= 0.05) return null;
+  return {
+    x: (cx / cw * 0.5 + 0.5) * W,
+    y: (1 - (cy / cw * 0.5 + 0.5)) * H,
+  };
+}
+
+/**
+ * Upload the frame mesh and draw it.
+ */
+function flushMesh() {
+  if (!gl || !scratch.length) return;
+  gl.useProgram(prog);
+  gl.uniformMatrix4fv(locMvp, false, vp);
+  gl.uniform3fv(locLight, LIGHT);
+  gl.bindBuffer(gl.ARRAY_BUFFER, meshBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(scratch), gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.enableVertexAttribArray(1);
+  gl.enableVertexAttribArray(2);
+  gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 36, 0);
+  gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 36, 12);
+  gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 36, 24);
+  gl.drawArrays(gl.TRIANGLES, 0, scratch.length / 9);
+}
+
+/**
+ * Flat contact shadow on the ground. Call in local space at the feet.
+ * @param {number} rx
+ * @param {number} rz
+ */
+function footShadow(rx, rz) {
+  unlit = true;
+  pushModel();
+  apply(matTranslate(0, 0.5, 0));
+  ellipsoid(rx, 0.45, rz, '#c4a882');
+  popModel();
+  unlit = false;
+}
+
+/**
+ * Stable 0–1 value for scenery placed once around the court.
+ * @param {number} n
+ * @returns {number}
+ */
+function sceneryRand(n) {
+  const x = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+  return x - Math.floor(x);
+}
+
+/**
+ * Push one already-world-space vertex.
+ * @param {number} x
+ * @param {number} y
+ * @param {number} z
+ * @param {number[]} col
+ */
+function pushVert(x, y, z, col) {
+  scratch.push(x, y, z, 0, 0, 0, col[0], col[1], col[2]);
+}
+
+/**
+ * Sky cylinder around the camera, warm at the horizon and blue overhead.
+ */
+function drawSky() {
+  const cx = cam.ex;
+  const cz = cam.ez;
+  const radius = 3100;
+  const segs = 22;
+  const stops = [
+    { y: -40, color: rgb('#f3d7a4') },
+    { y: 90, color: rgb('#f7e6bc') },
+    { y: 200, color: rgb('#d5eefb') },
+    { y: 380, color: rgb('#8ecae8') },
+    { y: 640, color: rgb('#4aa3d8') },
+    { y: 1000, color: rgb('#2f86c4') },
+  ];
+  for (let b = 0; b < stops.length - 1; b++) {
+    const y0 = stops[b].y;
+    const y1 = stops[b + 1].y;
+    const c0 = stops[b].color;
+    const c1 = stops[b + 1].color;
+    for (let i = 0; i < segs; i++) {
+      const a0 = (i / segs) * Math.PI * 2;
+      const a1 = ((i + 1) / segs) * Math.PI * 2;
+      const x0 = cx + Math.cos(a0) * radius;
+      const z0 = cz + Math.sin(a0) * radius;
+      const x1 = cx + Math.cos(a1) * radius;
+      const z1 = cz + Math.sin(a1) * radius;
+      pushVert(x0, y0, z0, c0);
+      pushVert(x1, y0, z1, c0);
+      pushVert(x1, y1, z1, c1);
+      pushVert(x0, y0, z0, c0);
+      pushVert(x1, y1, z1, c1);
+      pushVert(x0, y1, z0, c1);
+    }
+  }
+}
+
+/**
+ * Sunlit plain under the horizon. Follows the camera so the edge never shows.
+ */
+function drawCountry() {
+  const cx = cam.ex;
+  const cz = cam.ez;
+  const radius = 3000;
+  const segs = 28;
+  const y = -2;
+  const tint = rgb('#e4c56b');
+  for (let i = 0; i < segs; i++) {
+    const a0 = (i / segs) * Math.PI * 2;
+    const a1 = ((i + 1) / segs) * Math.PI * 2;
+    pushVert(cx, y, cz, tint);
+    pushVert(cx + Math.cos(a0) * radius, y, cz + Math.sin(a0) * radius, tint);
+    pushVert(cx + Math.cos(a1) * radius, y, cz + Math.sin(a1) * radius, tint);
+  }
+}
+
+/**
+ * A tall, narrow cypress. Two cones so the silhouette stays pointed.
+ * @param {number} x
+ * @param {number} z
+ * @param {number} height
+ */
+function drawCypress(x, z, height) {
+  const slim = Math.max(6, height * 0.085);
+  pushModel();
+  apply(matTranslate(x, 0, z));
+  pushModel();
+  apply(matTranslate(0, 3, 0));
+  taper(2.2, 1.5, 6, 8, '#6a4630');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 6 + height * 0.5, 0));
+  taper(slim, height * 0.012, height, 16, '#1e5636');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 10 + height * 0.4, 0));
+  taper(slim * 0.62, height * 0.008, height * 0.78, 14, '#32784a');
+  popModel();
+  popModel();
+}
+
+/**
+ * A small ancient stone house or a broken ruin, with a door and columns.
+ * @param {number} x
+ * @param {number} z
+ * @param {number} yaw
+ * @param {number} w
+ * @param {number} d
+ * @param {number} h
+ * @param {boolean} ruined
+ */
+function drawStoneHouse(x, z, yaw, w, d, h, ruined) {
+  const wallH = ruined ? h * 0.58 : h;
+  pushModel();
+  apply(matTranslate(x, 0, z));
+  apply(matRotateY(yaw));
+  pushModel();
+  apply(matTranslate(0, 4, 0));
+  cube(w + 16, 8, d + 12, '#cbb892');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 8 + wallH / 2, 0));
+  cube(w, wallH, d, ruined ? '#d9c7a6' : '#e7d6b6');
+  popModel();
+  if (!ruined) {
+    pushModel();
+    apply(matTranslate(0, 8 + h + 3.5, 0));
+    cube(w + 8, 7, d + 6, '#b7a07e');
+    popModel();
+  }
+  pushModel();
+  apply(matTranslate(0, 8 + wallH * 0.28, d / 2));
+  cube(Math.min(16, w * 0.28), wallH * 0.48, 4, '#8a7054');
+  popModel();
+  const span = w * 0.34;
+  for (let s = -1; s <= 1; s += 2) {
+    if (ruined && s > 0) continue;
+    pushModel();
+    apply(matTranslate(s * span, 8 + wallH * 0.42, d / 2 + 5));
+    prism(3.4, wallH * 0.84, 14, '#f4ead8');
+    popModel();
+  }
+  popModel();
+}
+
+/**
+ * Whether scenery is safely beyond the expanding temple.
+ * @param {number} x
+ * @param {number} z
+ * @param {number} margin
+ * @returns {boolean}
+ */
+function beyondCourt(x, z, margin) {
+  return x < FLOOR.l - margin || x > FLOOR.r + margin ||
+    z < FLOOR.t - margin || z > FLOOR.b + margin;
+}
+
+/**
+ * Country around the temple: cypress trees and old stone houses.
+ */
+function drawScenery() {
+  drawSky();
+  drawCountry();
+  drawClouds();
+  drawSun();
+  const houses = [
+    [1320, 160, 0.5, 96, 70, 62, false],
+    [1500, 420, -0.4, 72, 54, 46, true],
+    [1160, 20, 0.15, 64, 48, 40, false],
+    [-260, 180, 2.4, 88, 62, 58, false],
+    [-400, 460, 1.2, 60, 46, 34, true],
+    [240, 1020, -2.8, 80, 58, 48, false],
+    [820, 1100, 2.7, 92, 66, 54, true],
+    [1680, -80, -0.7, 110, 74, 72, false],
+  ];
+  for (let i = 0; i < houses.length; i++) {
+    const h = houses[i];
+    if (!beyondCourt(h[0], h[1], 150)) continue;
+    drawStoneHouse(h[0], h[1], h[2], h[3], h[4], h[5], h[6]);
+  }
+  const grove = [
+    [1180, 240, 120], [1260, 300, 90], [1400, 220, 140], [1460, 340, 80],
+    [-180, 250, 130], [-300, 320, 100], [-360, 160, 150],
+    [180, 920, 110], [320, 980, 85], [700, 1000, 125], [900, 1040, 95],
+    [1580, 60, 135], [1740, 40, 100], [1600, 200, 80],
+    [1100, 560, 115], [-120, 640, 90],
+  ];
+  for (let i = 0; i < grove.length; i++) {
+    const g = grove[i];
+    if (!beyondCourt(g[0], g[1], 100)) continue;
+    drawCypress(g[0], g[1], g[2]);
+  }
+  for (let i = 0; i < 18; i++) {
+    const a = sceneryRand(i + 3) * Math.PI * 2;
+    const rad = 980 + sceneryRand(i + 17) * 620;
+    const x = 480 + Math.cos(a) * rad;
+    const z = 330 + Math.sin(a) * rad;
+    if (!beyondCourt(x, z, 130)) continue;
+    drawCypress(x, z, 60 + sceneryRand(i + 8) * 80);
+  }
+}
+
+/**
+ * Bright disc that stays facing the camera.
+ */
+function drawSun() {
+  const sunX = 1680;
+  const sunY = 460;
+  const sunZ = -280;
+  const yaw = Math.atan2(cam.ex - sunX, cam.ez - sunZ);
+  unlit = true;
+  pushModel();
+  apply(matTranslate(sunX, sunY, sunZ));
+  apply(matRotateY(yaw));
+  apply(matRotateX(Math.PI / 2));
+  prism(150, 8, 28, '#fff4c4');
+  prism(78, 14, 28, '#ffe56a');
+  popModel();
+  unlit = false;
+}
+
+/**
+ * A few flat clouds, far enough to drift slowly as the camera turns.
+ */
+function drawClouds() {
+  const clouds = [
+    [200, 620, -900, 280, 36, 90],
+    [1100, 700, -600, 340, 32, 110],
+    [-200, 760, 200, 260, 28, 80],
+    [900, 680, 1400, 300, 30, 100],
+    [1500, 740, 400, 220, 26, 70],
+  ];
+  unlit = true;
+  for (let i = 0; i < clouds.length; i++) {
+    const c = clouds[i];
+    pushModel();
+    apply(matTranslate(c[0], c[1], c[2]));
+    cube(c[3], c[4], c[5], '#fffaf0');
+    popModel();
+  }
+  unlit = false;
+}
+
+/**
+ * Temple wall, colonnade, and the stone floor.
+ */
+function drawCourt3d() {
+  const centerX = (FLOOR.l + FLOOR.r) / 2;
+  const centerZ = (FLOOR.t + FLOOR.b) / 2;
+  const width = FLOOR.r - FLOOR.l;
+  const depth = FLOOR.b - FLOOR.t;
+  const colZ = FLOOR.t - 74;
+  pushModel();
+  apply(matTranslate(centerX, 70, FLOOR.t - 150));
+  cube(width + 380, 200, 50, '#6e3028');
+  popModel();
+
+  pushModel();
+  apply(matTranslate(centerX, 1, centerZ));
+  cube(width + 220, 4, depth + 180, '#a68462');
+  popModel();
+
+  pushModel();
+  apply(matTranslate((FLOOR.l + FLOOR.r) / 2, 3, (FLOOR.t + FLOOR.b) / 2));
+  cube(FLOOR.r - FLOOR.l, 4, FLOOR.b - FLOOR.t, '#c9a478');
+  popModel();
+
+  const tile = 46;
+  for (let z = FLOOR.t; z < FLOOR.b - 2; z += tile) {
+    for (let x = FLOOR.l; x < FLOOR.r - 2; x += tile) {
+      const col = Math.round((x - FLOOR.l) / tile);
+      const row = Math.round((z - FLOOR.t) / tile);
+      const mark = (col * 5 + row * 3) % 11;
+      let color = '#ddb68a';
+      if (mark === 0) color = '#d2ac7c';
+      else if ((col + row) % 2 === 0) color = '#e8c99c';
+      const tw = Math.min(tile - 3, FLOOR.r - x);
+      const td = Math.min(tile - 3, FLOOR.b - z);
+      pushModel();
+      apply(matTranslate(x + tw / 2, 6, z + td / 2));
+      cube(tw, 4, td, color);
+      popModel();
+    }
+  }
+
+  for (let x = FLOOR.l - 6; x <= FLOOR.r + 10; x += 104) {
+    pushModel();
+    apply(matTranslate(x, 58, colZ));
+    prism(16, 108, 20, '#f3e6d0');
+    popModel();
+    pushModel();
+    apply(matTranslate(x, 116, colZ));
+    prism(20, 12, 14, '#f7f0e4');
+    popModel();
+  }
+
+  pushModel();
+  apply(matTranslate(centerX, 128, colZ));
+  cube(width + 180, 18, 52, '#8c4034');
+  popModel();
+  pushModel();
+  apply(matTranslate(centerX, 140, colZ));
+  cube(width + 190, 5, 58, '#e2b44a');
+  popModel();
+}
+
+/**
+ * Cracks and a dent on a table that has already been flipped.
+ * Drawn in the table's local space.
+ * @param {object} table
+ * @param {object} scars
+ */
+function drawTableDamage(table, scars) {
+  const dent = scars.dent;
+  pushModel();
+  apply(matTranslate(dent.x, 34.2, dent.z));
+  ellipsoid(7, 1.1, 5.5, '#5c341c');
+  popModel();
+  pushModel();
+  apply(matTranslate(dent.x + 4, 35.4, dent.z - 2));
+  apply(matRotateZ(0.8));
+  apply(matRotateY(0.4));
+  cube(4.5, 1.3, 7, '#7a4a2a');
+  popModel();
+  for (let i = 0; i < scars.cracks.length; i++) {
+    const crack = scars.cracks[i];
+    pushModel();
+    apply(matTranslate(crack.x, 34.7, crack.z));
+    apply(matRotateY(crack.yaw));
+    cube(crack.len, 0.7 + Math.min(scars.hits, 4) * 0.15, 1.2 + Math.min(scars.hits, 4) * 0.25, '#2c1a10');
+    popModel();
+    if (i === 0) {
+      pushModel();
+      apply(matTranslate(crack.x + 2, 34.7, crack.z + 3));
+      apply(matRotateY(crack.yaw + 0.9));
+      cube(crack.len * 0.55, 0.6, 1.1, '#2c1a10');
+      popModel();
+    }
+  }
+  pushModel();
+  apply(matTranslate(table.w * 0.32, 31, 16));
+  cube(6, 3, 4, '#6b4224');
+  popModel();
+  if (scars.hits >= 3) {
+    pushModel();
+    apply(matTranslate(-table.w * 0.15, 36, -4));
+    apply(matRotateZ(0.5 + scars.hits * 0.08));
+    cube(14, 2, 8, '#8d5a32');
+    popModel();
+  }
+  if (scars.hits >= 5) {
+    pushModel();
+    apply(matTranslate(8, 32, 8));
+    ellipsoid(6, 1.4, 5, '#3a2416');
+    popModel();
+  }
+}
+
+/**
+ * One table, tumbling in place once it has been hit.
+ * @param {object} table
+ */
+function drawTable3d(table) {
+  const lift = tableLift(table);
+  pushModel();
+  apply(matTranslate(table.x, GROUND + lift, table.y));
+  apply(matTranslate(0, 16, 0));
+  apply(matRotateY(table.ry || 0));
+  apply(matRotateX(table.rx || 0));
+  apply(matRotateZ(table.rz || 0));
+  apply(matTranslate(0, -16, 0));
+
+  const hw = table.w / 2 - 8;
+  const legs = [-hw, hw];
+  const depths = [-16, 16];
+  const scars = table.scars;
+  for (let i = 0; i < legs.length; i++) {
+    for (let j = 0; j < depths.length; j++) {
+      const legId = i * 2 + j;
+      const broken = scars && scars.legs.indexOf(legId) >= 0;
+      const stump = broken && scars.hits >= 4 && scars.legs[0] === legId;
+      pushModel();
+      if (stump) {
+        apply(matTranslate(legs[i], 4, depths[j]));
+        prism(2.2, 6, 6, '#4a2e18');
+      } else if (broken) {
+        apply(matTranslate(legs[i], 9, depths[j]));
+        apply(matRotateZ((legs[i] > 0 ? 0.7 : -0.7) + scars.hits * 0.08));
+        prism(2.3, 14, 6, '#6b4224');
+        pushModel();
+        apply(matTranslate(3, -4, 2));
+        apply(matRotateZ(-1.1));
+        cube(2.2, 9, 2.2, '#4a2e18');
+        popModel();
+      } else {
+        apply(matTranslate(legs[i], 14, depths[j]));
+        prism(2.6, 28, 6, '#6b4224');
+      }
+      popModel();
+    }
+  }
+  pushModel();
+  apply(matTranslate(0, 30, 0));
+  cube(table.w, 5, 44, scars ? '#8d5a32' : '#a56b32');
+  popModel();
+  if (scars && scars.hits >= 3) {
+    pushModel();
+    apply(matTranslate(-table.w * 0.22, 33.2, 0));
+    cube(table.w * 0.4, 2.2, 30, '#b07848');
+    popModel();
+    pushModel();
+    apply(matTranslate(table.w * 0.22, 33.6, 1));
+    apply(matRotateZ(0.08 * Math.min(scars.hits, 6)));
+    cube(Math.max(8, table.w * 0.34 - scars.hits), 2.2, 28, '#9a6840');
+    popModel();
+  } else {
+    pushModel();
+    apply(matTranslate(0, 33.2, 0));
+    cube(table.w - 10, 2.2, 32, scars ? '#b07848' : '#c4894a');
+    popModel();
+  }
+  if (scars) drawTableDamage(table, scars);
+  const clothW = scars ? Math.max(8, table.w - 14 - scars.hits * 7) : table.w - 12;
+  const clothH = scars ? Math.max(4, 15 - scars.hits * 2.5) : 16;
+  pushModel();
+  apply(matTranslate(scars ? -4 : 0, scars ? 16 : 20, 18));
+  cube(clothW, clothH, 3, table.cloth);
+  popModel();
+  if (scars && scars.hits < 4) {
+    pushModel();
+    apply(matTranslate(table.w * 0.28, 12, 19));
+    apply(matRotateX(0.55));
+    cube(9, 12, 2.2, table.cloth);
+    popModel();
+  }
+  const coinKeep = scars ? Math.max(0, table.coins.length - scars.hits) : table.coins.length;
+  for (let i = 0; i < coinKeep; i++) {
+    const coin = table.coins[i];
+    pushModel();
+    apply(matTranslate(coin.x, 37, coin.z || 0));
+    prism(coin.r, 2.8, 8, '#f0c14a');
+    popModel();
+  }
+  popModel();
+}
+
+/**
+ * A flat sandal under the current origin: sole and two straps.
+ * @param {number} radius
+ */
+function sandal(radius) {
+  ellipsoid(radius * 1.45, 0.7, radius * 3.1, '#8d5a32');
+  pushModel();
+  apply(matTranslate(0, 1.05, radius * 1.15));
+  ellipsoid(radius * 1.15, 0.32, 0.5, '#c4894a');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 1, -radius * 0.15));
+  ellipsoid(radius * 0.9, 0.28, 0.42, '#c4894a');
+  popModel();
+}
+
+/**
+ * Bright low-poly sneaker under the current origin.
+ * @param {number} radius
+ */
+function sneaker(radius) {
+  pushModel();
+  apply(matTranslate(0, 0.15, radius * 0.25));
+  ellipsoid(radius * 1.55, 0.78, radius * 3.3, '#fff8df');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 1.15, radius * 0.15));
+  ellipsoid(radius * 1.32, radius * 0.9, radius * 2.25, '#f4c934');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 2.05, -radius * 1.1));
+  taper(radius * 1.2, radius * 0.85, radius * 1.8, 14, '#e8b921');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 3, -radius * 1.05));
+  ellipsoid(radius * 0.72, 0.32, radius * 0.85, '#6b5424');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 1.5, radius * 1.55));
+  ellipsoid(radius * 1.2, 0.55, radius * 1.05, '#fffdf4');
+  popModel();
+  for (let i = -1; i <= 1; i++) {
+    pushModel();
+    apply(matTranslate(0, 2, i * radius * 0.62));
+    cube(radius * 2.1, 0.22, 0.32, '#fffdf4');
+    popModel();
+  }
+}
+
+/**
+ * A limb hanging from the origin, with a hand, foot, sandal, or sneaker.
+ * @param {number} radius
+ * @param {number} length
+ * @param {string} color
+ * @param {string} tip
+ * @param {''|'sandal'|'sneaker'} [footwear]
+ */
+function limb(radius, length, color, tip, footwear) {
+  pushModel();
+  apply(matTranslate(0, -length * 0.46, 0));
+  ellipsoid(radius, length * 0.46, radius * 0.82, color);
+  popModel();
+  pushModel();
+  apply(matTranslate(0, -length + (footwear ? 0.6 : 0), footwear ? 1.5 : 0));
+  if (footwear === 'sandal') sandal(radius);
+  else if (footwear === 'sneaker') sneaker(radius);
+  else ellipsoid(radius * 1.2, radius * 0.95, radius * 1.05, tip);
+  popModel();
+}
+
+/**
+ * Legs and arms for a figure already facing its yaw.
+ * @param {object} pose
+ */
+function drawLimbs(pose) {
+  const step = Math.sin(pose.step || 0);
+  const lift = pose.hands || 0;
+  const crouch = pose.crouch || 0;
+  const toss = pose.toss || 0;
+  const skin = pose.skin;
+  const sleeve = pose.sleeve || skin;
+  const footwear = pose.sneakers ? 'sneaker' : (pose.sandals ? 'sandal' : '');
+  for (let side = -1; side <= 1; side += 2) {
+    pushModel();
+    apply(matTranslate(side * pose.hip, pose.hipY, 0));
+    const stride = (pose.stride || 0) * (1 - crouch);
+    apply(matRotateX(step * side * stride - 0.95 * crouch));
+    limb(pose.legR, pose.legLen, skin, skin, footwear);
+    popModel();
+  }
+  for (let side = -1; side <= 1; side += 2) {
+    pushModel();
+    apply(matTranslate(side * pose.shoulder, pose.shoulderY, 1));
+    let z = side * 0.18;
+    let x = step * -side * (pose.armSwing || 0);
+    z += (side * -0.45 - z) * lift;
+    x += (-2.65 - x) * lift;
+    z += (side * 0.5 - z) * crouch;
+    x += (-2.05 - x) * crouch;
+    z += (side * 0.12 - z) * toss;
+    x += (-2.7 - x) * toss;
+    apply(matRotateZ(z));
+    apply(matRotateX(x));
+    limb(pose.armR, pose.armLen, sleeve, skin);
+    popModel();
+  }
+}
+
+/**
+ * A pacing or airborne money-changer.
+ * @param {object} merchant
+ */
+function drawMerchant3d(merchant) {
+  const yaw = merchant.yaw != null ? merchant.yaw : (merchant.facing > 0 ? 0.5 : -0.5);
+  const duck = merchant.duck || 0;
+  const sink = 9 * duck;
+  pushModel();
+  apply(matTranslate(merchant.x, GROUND, merchant.y));
+  footShadow(11, 8);
+  apply(matTranslate(0, merchant.h || 0, 0));
+  if ((merchant.h || 0) > 1) apply(matRotateZ(merchant.spin));
+  else apply(matRotateY(yaw));
+  if (duck > 0.001) apply(matRotateX(0.4 * duck));
+  pushModel();
+  apply(matTranslate(0, 20 - sink, 0));
+  ellipsoid(11, 12, 9, merchant.color);
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 40 - sink, 1));
+  ellipsoid(7, 8, 7, '#f3c7a8');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 44 - sink, -1));
+  ellipsoid(7.4, 5, 7.2, '#3a2a22');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 18 - sink, 7));
+  ellipsoid(3.2, 2.2, 2.2, '#e2b44a');
+  popModel();
+  drawLimbs({
+    step: merchant.phase * 1.35,
+    hands: 0,
+    crouch: duck,
+    skin: '#f3c7a8',
+    sleeve: merchant.color,
+    hip: 4.6,
+    hipY: 14 - 5 * duck,
+    legR: 2.8,
+    legLen: 12,
+    shoulder: 11,
+    shoulderY: 32 - 8 * duck,
+    armR: 2.2,
+    armLen: 20,
+    stride: 0.4 * (1 - duck),
+    armSwing: 0.35 * (1 - duck),
+    reach: 0,
+  });
+  popModel();
+}
+
+/**
+ * A thin gold ring lying flat above the head, like an angel's halo.
+ * @param {number} radius
+ * @param {number} pulse
+ */
+function haloRing(radius, pulse) {
+  const tube = 0.58 + pulse * 0.08;
+  const major = 48;
+  const minor = 8;
+  const rgbv = [1, 0.76 + pulse * 0.18, 0.2 + pulse * 0.12];
+  /**
+   * One point on the ring.
+   * @param {number} i
+   * @param {number} j
+   * @returns {number[]}
+   */
+  function point(i, j) {
+    const u = (i / major) * Math.PI * 2;
+    const v = (j / minor) * Math.PI * 2;
+    const ring = radius + Math.cos(v) * tube;
+    return [Math.cos(u) * ring, Math.sin(v) * tube, Math.sin(u) * ring];
+  }
+  unlit = true;
+  for (let i = 0; i < major; i++) {
+    for (let j = 0; j < minor; j++) {
+      const a = point(i, j);
+      const b = point(i + 1, j);
+      const c = point(i + 1, j + 1);
+      const d = point(i, j + 1);
+      emitSmooth(a, a, rgbv);
+      emitSmooth(b, b, rgbv);
+      emitSmooth(c, c, rgbv);
+      emitSmooth(a, a, rgbv);
+      emitSmooth(c, c, rgbv);
+      emitSmooth(d, d, rgbv);
+    }
+  }
+  unlit = false;
+}
+
+/**
+ * Shoulder-length hair down the back, and a short beard.
+ */
+function drawHairAndBeard() {
+  pushModel();
+  apply(matTranslate(0, 46.2, -1.8));
+  ellipsoid(7.0, 3.3, 5.6, '#4a3428');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 36, -4.0));
+  ellipsoid(6.2, 11, 2.8, '#3d2b22');
+  popModel();
+  for (let side = -1; side <= 1; side += 2) {
+    pushModel();
+    apply(matTranslate(side * 4.4, 36, -2.8));
+    ellipsoid(3.2, 10, 2.4, '#4a3428');
+    popModel();
+    pushModel();
+    apply(matTranslate(side * 4.8, 37.5, 4.2));
+    ellipsoid(1.6, 5.2, 1.8, '#4a3428');
+    popModel();
+  }
+  pushModel();
+  apply(matTranslate(0, 36.2, 6.2));
+  ellipsoid(3.2, 2.4, 1.8, '#4a3428');
+  popModel();
+}
+
+/**
+ * A narrow white robe, sandals, long hair, a beard, and a halo overhead.
+ */
+function drawPlayer3d() {
+  const p = game.player;
+  const gait = p.gait || 0;
+  const wob = Math.sin(p.bob);
+  const toss = p.toss || 0;
+  const haloPulse = 0.5 + 0.5 * Math.sin(performance.now() / 360);
+  pushModel();
+  apply(matTranslate(p.x, GROUND + Math.abs(wob) * (0.4 + 1.8 * gait), p.y));
+  apply(matScale(1.32, 1.32, 1.32));
+  footShadow(5.5, 4);
+  apply(matRotateY(p.yaw));
+  apply(matRotateZ(wob * (0.02 + 0.06 * gait)));
+  apply(matRotateX(0.2 * toss));
+  pushModel();
+  apply(matTranslate(0, 20, 0));
+  taper(6.6, 3.8, 24, 16, '#f6f3ec');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 18, 0.4));
+  taper(4.6, 4.2, 2.2, 14, '#e2b44a');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 33, 0.4));
+  ellipsoid(2.1, 2.2, 2, '#f3c7a8');
+  popModel();
+  pushModel();
+  apply(matTranslate(0, 41, 1));
+  ellipsoid(6.2, 7, 6, '#f3c7a8');
+  popModel();
+  drawHairAndBeard();
+  pushModel();
+  apply(matTranslate(0, 52.5, 0));
+  apply(matScale(1 + haloPulse * 0.035, 1, 1 + haloPulse * 0.035));
+  haloRing(7.2, haloPulse);
+  popModel();
+  drawLimbs({
+    step: p.bob,
+    hands: 0,
+    skin: '#f3c7a8',
+    sleeve: '#f7f4ee',
+    hip: 2.2,
+    hipY: 12,
+    legR: 1.45,
+    legLen: 11,
+    shoulder: 7,
+    shoulderY: 30,
+    armR: 1.7,
+    armLen: 16,
+    stride: 0.08 + 0.62 * gait,
+    armSwing: 0.05 + 0.45 * gait,
+    toss: toss,
+    sandals: !p.sneakers,
+    sneakers: !!p.sneakers,
+  });
+  popModel();
+}
+
+/**
+ * A coin or scroll in the air.
+ * @param {object} particle
+ */
+function drawParticle3d(particle) {
+  pushModel();
+  apply(matTranslate(particle.x, GROUND + particle.h, particle.y));
+  apply(matRotateY(particle.rot));
+  apply(matRotateX(particle.rot * 0.6));
+  if (particle.kind === 'coin') prism(5, 2.4, 8, '#f0c14a');
+  else cube(8, 12, 2.2, '#f3e6c8');
+  popModel();
+}
+
+/**
+ * Hovering sneaker and rotating light rays for the speed pickup.
+ */
+function drawSneakerPickup3d() {
+  const pickup = game.sneaker;
+  if (!pickup || pickup.delay > 0) return;
+  const now = performance.now();
+  const pulse = 0.5 + 0.5 * Math.sin(now / 180);
+  const spin = now / 900;
+  for (let i = 0; i < 12; i++) {
+    pushModel();
+    apply(matTranslate(pickup.x, GROUND + 1.2, pickup.y));
+    apply(matRotateY(spin + i * Math.PI / 6));
+    apply(matTranslate(0, 0, 24 + pulse * 5));
+    cube(2.2 + pulse, 0.8, 36 + pulse * 8, i % 2 ? '#ffe890' : '#f4c934');
+    popModel();
+  }
+  pushModel();
+  apply(matTranslate(pickup.x, GROUND + 3, pickup.y));
+  haloRing(24 + pulse * 3, pulse);
+  popModel();
+  pushModel();
+  apply(matTranslate(pickup.x, GROUND + 19 + pulse * 3, pickup.y));
+  apply(matRotateY(Math.PI / 2 + Math.sin(now / 700) * 0.32));
+  apply(matRotateZ(-0.18));
+  apply(matScale(4, 4, 4));
+  sneaker(1.5);
+  popModel();
+}
+
+/**
+ * Gold frame on the floor around the table Space or E will hit.
+ */
+function drawHighlight3d() {
+  if (game.mode !== 'play') return;
+  const table = nearestUpright(game.player.x, game.player.y, KEY_RANGE);
+  if (!table) return;
+  const color = game.banner > FLIP_LOCK ? '#b89a58' : '#ffe08a';
+  const hw = table.w / 2 + 12;
+  const hd = 28;
+  const y = GROUND + 1.4;
+  pushModel();
+  apply(matTranslate(table.x, y, table.y - hd));
+  cube(hw * 2, 1.6, 3, color);
+  popModel();
+  pushModel();
+  apply(matTranslate(table.x, y, table.y + hd));
+  cube(hw * 2, 1.6, 3, color);
+  popModel();
+  pushModel();
+  apply(matTranslate(table.x - hw, y, table.y));
+  cube(3, 1.6, hd * 2, color);
+  popModel();
+  pushModel();
+  apply(matTranslate(table.x + hw, y, table.y));
+  cube(3, 1.6, hd * 2, color);
+  popModel();
+}
+
+/**
+ * Build and draw the 3D court.
+ */
+function drawScene() {
+  if (!gl || glFailed) return;
+  updateCamera();
+  scratch.length = 0;
+  model = ident();
+  modelStack.length = 0;
+  gl.viewport(0, 0, view.width, view.height);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  drawScenery();
+  drawCourt3d();
+  for (let i = 0; i < game.tables.length; i++) drawTable3d(game.tables[i]);
+  for (let i = 0; i < game.merchants.length; i++) drawMerchant3d(game.merchants[i]);
+  drawSneakerPickup3d();
+  if (game.player) drawPlayer3d();
+  for (let i = 0; i < game.particles.length; i++) drawParticle3d(game.particles[i]);
+  drawHighlight3d();
+  flushMesh();
+}
+
+/**
+ * Soft screen-space aura around the halo.
+ */
+function drawHaloGlow() {
+  if (!game.player || !cam) return;
+  const p = game.player;
+  const gait = p.gait || 0;
+  const bob = Math.sin(p.bob);
+  const lift = Math.abs(bob) * (0.4 + 1.8 * gait);
+  const pt = projectToScreen(p.x, GROUND + lift + 52.5 * 1.32, p.y);
+  if (!pt) return;
+  const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 360);
+  const radius = 24 + pulse * 8;
+  const glow = ctx.createRadialGradient(pt.x, pt.y, 3, pt.x, pt.y, radius);
+  glow.addColorStop(0, 'rgba(255, 244, 124, ' + (0.28 + pulse * 0.18) + ')');
+  glow.addColorStop(0.38, 'rgba(255, 220, 66, ' + (0.18 + pulse * 0.12) + ')');
+  glow.addColorStop(1, 'rgba(255, 204, 40, 0)');
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+/**
+ * Pulsing aura and expiry readout around the speed sneaker.
+ */
+function drawSneakerGlow() {
+  const pickup = game.sneaker;
+  if (!pickup || pickup.delay > 0 || !cam) return;
+  const pt = projectToScreen(pickup.x, GROUND + 21, pickup.y);
+  if (!pt) return;
+  const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 180);
+  const radius = 42 + pulse * 13;
+  const glow = ctx.createRadialGradient(pt.x, pt.y, 4, pt.x, pt.y, radius);
+  glow.addColorStop(0, 'rgba(255, 248, 132, 0.6)');
+  glow.addColorStop(0.42, 'rgba(255, 217, 48, 0.3)');
+  glow.addColorStop(1, 'rgba(255, 198, 20, 0)');
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  label('SPEED UP  ' + Math.max(0, pickup.time).toFixed(1), pt.x, pt.y - 48, '700 12px ' + FONT, '#fff3a4', 'center', 'middle');
+}
+
+/**
+ * Arcade reward burst shown after the sneaker is collected.
+ */
+function drawSpeedFlash() {
+  if (game.speedFlash <= 0) return;
+  const age = SPEED_FLASH_TIME - game.speedFlash;
+  let alpha = Math.min(1, age / 0.08);
+  if (game.speedFlash < 0.35) alpha *= game.speedFlash / 0.35;
+  const punch = age < 0.22 ? 1.42 - age / 0.22 * 0.42 : 1;
+  const cx = W / 2;
+  const cy = H * 0.42;
+
+  if (age < 0.12) {
+    ctx.save();
+    ctx.globalAlpha = (1 - age / 0.12) * 0.7;
+    ctx.fillStyle = '#fff5a6';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.translate(cx, cy);
+  ctx.scale(punch, punch);
+  ctx.strokeStyle = '#f5ca38';
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  for (let i = 0; i < 7; i++) {
+    const y = -50 + i * 17;
+    const reach = 110 + (i % 3) * 28;
+    ctx.beginPath();
+    ctx.moveTo(-115, y);
+    ctx.lineTo(-115 - reach, y - 8);
+    ctx.moveTo(115, y);
+    ctx.lineTo(115 + reach, y - 8);
+    ctx.stroke();
+  }
+  ctx.shadowColor = '#ffd83d';
+  ctx.shadowBlur = 22;
+  ctx.font = '700 58px ' + NUM;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineWidth = 8;
+  ctx.strokeStyle = 'rgba(54, 25, 8, 0.88)';
+  ctx.strokeText('SUPER SPEED!', 0, -4);
+  ctx.fillStyle = '#fff07a';
+  ctx.fillText('SUPER SPEED!', 0, -4);
+  ctx.shadowBlur = 0;
+  trackedLabel('SNEAKERS EQUIPPED', 0, 40, '700 12px ' + FONT, '#fff8de', 2);
+  ctx.restore();
+}
+
+/**
+ * The short "No." said by whoever just lost a table.
+ */
+function drawBubbles() {
+  for (let i = 0; i < game.bubbles.length; i++) {
+    const bubble = game.bubbles[i];
+    const lift = bubble.merchant ? (bubble.merchant.h || 0) + 78 : 74;
+    const pt = projectToScreen(bubble.x, GROUND + lift, bubble.y);
+    if (!pt) continue;
+    const remain = bubble.life - bubble.age;
+    const alpha = remain < 0.2 ? Math.max(0, remain / 0.2) : 1;
+    const rise = Math.min(bubble.age, 0.25) * 14;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(clamp(pt.x, 58, W - 58), clamp(pt.y - rise, 94, H - 58));
+    ctx.fillStyle = '#fffaf3';
+    roundRect(-26, -32, 52, 28, 8);
+    ctx.fill();
+    ctx.strokeStyle = '#2a1c14';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(-6, -4);
+    ctx.lineTo(-1, 8);
+    ctx.lineTo(5, -4);
+    ctx.closePath();
+    ctx.fill();
+    label('No.', 0, -18, '700 16px ' + FONT, '#2a1c14', 'center', 'middle');
+    ctx.restore();
+  }
+}
+
+/**
+ * Draw compact glowing clock medallions above newly flipped tables.
+ */
+function drawTimeBursts() {
+  for (const burst of game.timeBursts) {
+    const pt = projectToScreen(burst.x, GROUND + 64, burst.y);
+    if (!pt) continue;
+    const progress = burst.age / burst.life;
+    const alpha = progress > 0.7 ? (1 - progress) / 0.3 : 1;
+    const scale = progress < 0.16 ? 0.72 + progress / 0.16 * 0.28 : 1;
+    const rise = progress * 38;
+
+    ctx.save();
+    ctx.globalAlpha = clamp(alpha, 0, 1);
+    ctx.translate(pt.x, pt.y - rise);
+    ctx.scale(scale, scale);
+    ctx.shadowColor = '#ffe268';
+    ctx.shadowBlur = 24;
+    ctx.strokeStyle = 'rgba(255, 226, 104, 0.72)';
+    ctx.lineWidth = 3;
+    for (let ray = 0; ray < 12; ray++) {
+      const angle = ray * Math.PI / 6 + burst.age * 1.8;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(angle) * 42, Math.sin(angle) * 42);
+      ctx.lineTo(Math.cos(angle) * 50, Math.sin(angle) * 50);
+      ctx.stroke();
+    }
+    ctx.fillStyle = 'rgba(48, 18, 12, 0.93)';
+    ctx.beginPath();
+    ctx.arc(0, 0, 39, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = '#e2b44a';
+    ctx.stroke();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = '#fff1c2';
+    ctx.beginPath();
+    ctx.arc(0, 0, 44, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    drawHudIcon('time', 0, -13);
+    label('+' + FLIP_TIME_BONUS.toFixed(1), 0, 14, '700 20px ' + NUM, '#fff8ea', 'center', 'middle');
+    ctx.restore();
+  }
+}
+
+/**
+ * Draw the court, then the flat HUD on top.
+ */
+function draw() {
+  drawScene();
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  drawSneakerGlow();
+  drawHaloGlow();
+  drawBubbles();
+  if (glFailed) {
+    label('This browser has no WebGL, so the court cannot be drawn.', W / 2, H / 2, '18px ' + FONT, '#fff6e8', 'center', 'middle');
+  }
+  if (game.mode === 'play') {
+    drawHud();
+    drawTimeBursts();
+    drawBanner();
+    drawSpeedFlash();
+  } else {
+    drawOverlay();
+  }
+}
+/**
+ * Match the backing store to the screen so the court stays sharp.
+ */
+function fitCanvas() {
+  dpr = Math.min(2, window.devicePixelRatio || 1);
+  const width = Math.round(W * dpr);
+  const height = Math.round(H * dpr);
+  if (view.width !== width || view.height !== height || ui.width !== width || ui.height !== height) {
+    view.width = width;
+    view.height = height;
+    ui.width = width;
+    ui.height = height;
+  }
+}
+
+/**
+ * Main loop.
+ * @param {number} now
+ */
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000 || 0);
+  last = now;
+  update(dt);
+  draw();
+  pumpMusic();
+  requestAnimationFrame(frame);
+}
+
+game.best = loadBest();
+preloadSfx();
+game.player = makePlayer();
+fitCanvas();
+initGL();
+updateCamera();
+window.addEventListener('resize', fitCanvas);
+window.addEventListener('keydown', onKeyDown);
+window.addEventListener('keyup', onKeyUp);
+window.addEventListener('blur', function () {
+  keys.left = false;
+  keys.right = false;
+  keys.up = false;
+  keys.down = false;
+  pointer.down = false;
+});
+canvas.addEventListener('pointerdown', onPointerDown, { passive: false });
+window.addEventListener('pointermove', onPointerMove);
+window.addEventListener('pointerup', onPointerUp);
+window.addEventListener('pointercancel', onPointerUp);
+canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+canvas.addEventListener('dragstart', function (e) { e.preventDefault(); });
+last = performance.now();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+Battle Theme I
+By HydroGene
+
+Source:
+https://opengameart.org/content/16-bit-battle-theme-i
+
+License:
+Creative Commons Zero v1.0 Universal (CC0)
+https://creativecommons.org/publicdomain/zero/1.0/
+
+The included battle-theme-loop.ogg is the seamless loop supplied in the
+original Battle Theme I archive.
