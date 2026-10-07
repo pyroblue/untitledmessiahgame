@@ -1,15 +1,10 @@
-(Blood) Stained Glass
-By FoxSynergy
+Hey Ketchup (155 BPM)
 
 Source:
-https://opengameart.org/content/blood-stained-glass
+Provided by the project owner as Hey_Ketchup_155bpm.wav.
 
 License:
-Creative Commons Attribution 3.0 Unported (CC BY 3.0)
-https://creativecommons.org/licenses/by/3.0/
+Rights and licensing remain with the project owner.
 
-Attribution:
-"(Blood) Stained Glass" by FoxSynergy
-
-The included blood-stained-glass.mp3 is the original file supplied by
-the author on OpenGameArt.
+The included hey-ketchup-155bpm.mp3 is a 192 kbps MP3 conversion of
+the supplied 48 kHz stereo WAV.

@@ -701,7 +701,7 @@ function startMusic() {
   unlockAudio();
   if (musicOn) return;
   if (!musicTrack) {
-    musicTrack = new Audio('sounds/music/blood-stained-glass.mp3');
+    musicTrack = new Audio('sounds/music/hey-ketchup-155bpm.mp3');
     musicTrack.preload = 'auto';
     musicTrack.loop = true;
     musicTrack.volume = 0.4;
@@ -2076,12 +2076,17 @@ function drawBanner() {
 function drawHud() {
   ctx.save();
   const top = 14;
+  const timerTop = 10;
   hudPanel(18, top, 190, 58);
   hudPanel(W / 2 - 95, top, 190, 58);
-  hudPanel(W - 208, top, 190, 58);
+  ctx.save();
+  ctx.shadowColor = 'rgba(242, 196, 76, 0.3)';
+  ctx.shadowBlur = 14;
+  hudPanel(W - 238, timerTop, 220, 68);
+  ctx.restore();
   drawHudIcon('table', 42, top + 31);
   drawHudIcon('wave', W / 2 - 70, top + 31);
-  drawHudIcon('time', W - 182, top + 31);
+  drawHudIcon('time', W - 210, timerTop + 36);
 
   ctx.shadowColor = 'rgba(20, 8, 4, 0.55)';
   ctx.shadowOffsetY = 2;
@@ -2096,8 +2101,8 @@ function drawHud() {
   const urgent = game.time < 10;
   const color = urgent ? '#ff6c50' : '#fff6e8';
   if (urgent) ctx.globalAlpha = 0.55 + 0.45 * Math.abs(Math.sin(performance.now() / 140));
-  label('TIME', W - 38, top + 10, '700 11px ' + FONT, '#e9c878', 'right', 'top');
-  label(Math.max(0, game.time).toFixed(1), W - 38, top + 25, '700 25px ' + NUM, color, 'right', 'top');
+  label('TIME LEFT', W - 34, timerTop + 9, '700 12px ' + FONT, '#e9c878', 'right', 'top');
+  label(Math.max(0, game.time).toFixed(1), W - 34, timerTop + 27, '700 32px ' + NUM, color, 'right', 'top');
   ctx.globalAlpha = 1;
   ctx.fillStyle = 'rgba(255, 229, 162, 0.32)';
   ctx.fillRect(W / 2 + 5, top + 10, 1, 38);
