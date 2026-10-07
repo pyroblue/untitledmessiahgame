@@ -66,9 +66,18 @@
     display: none;
   }
   @media (hover: none) and (pointer: coarse) {
+    .stage {
+      --control-size: clamp(82px, 18vw, 112px);
+      width: min(calc(100vw - 12px), calc((100dvh - var(--control-size) - 58px) * 960 / 600));
+      max-height: calc(100dvh - var(--control-size) - 58px);
+      margin-bottom: calc(var(--control-size) + 10px);
+    }
     .mobile-controls {
       position: absolute;
-      inset: 0;
+      top: calc(100% + 10px);
+      right: 0;
+      left: 0;
+      height: var(--control-size);
       z-index: 3;
       display: block;
       pointer-events: none;
@@ -76,14 +85,14 @@
     .joystick,
     .flip-control {
       position: absolute;
-      bottom: clamp(16px, 4vw, 30px);
+      top: 0;
       pointer-events: auto;
       touch-action: none;
       -webkit-tap-highlight-color: transparent;
     }
     .joystick {
-      left: clamp(16px, 4vw, 30px);
-      width: clamp(88px, 20vw, 118px);
+      left: clamp(8px, 3vw, 20px);
+      width: var(--control-size);
       aspect-ratio: 1;
       border: 3px solid rgba(255, 235, 177, 0.72);
       border-radius: 50%;
@@ -121,8 +130,8 @@
       transform: translate(-50%, -50%);
     }
     .flip-control {
-      right: clamp(16px, 4vw, 30px);
-      width: clamp(88px, 20vw, 112px);
+      right: clamp(8px, 3vw, 20px);
+      width: var(--control-size);
       aspect-ratio: 1;
       border: 3px solid #fff1bd;
       border-radius: 50%;
@@ -141,6 +150,33 @@
     }
     .mobile-hint {
       display: inline;
+    }
+  }
+  @media (hover: none) and (pointer: coarse) and (orientation: landscape) {
+    .stage {
+      width: min(calc(100vw - var(--control-size) - var(--control-size) - 36px), calc((100dvh - 44px) * 960 / 600));
+      max-height: calc(100dvh - 44px);
+      margin-bottom: 0;
+    }
+    .mobile-controls {
+      inset: 0;
+      height: auto;
+    }
+    .joystick,
+    .flip-control {
+      top: 50%;
+      transform: translateY(-50%);
+    }
+    .joystick {
+      right: calc(100% + 14px);
+      left: auto;
+    }
+    .flip-control {
+      right: auto;
+      left: calc(100% + 14px);
+    }
+    .flip-control:active {
+      transform: translateY(calc(-50% + 5px));
     }
   }
 </style>
@@ -250,7 +286,7 @@ let gl = null;
 
 const keys = { left: false, right: false, up: false, down: false };
 const mobileKeys = { left: false, right: false, up: false, down: false };
-const joystick = { pointerId: null };
+const joystick = { pointerId: null, x: 0, y: 0 };
 
 /**
  * Load one local SVG from the Lucide icon pack.
@@ -398,6 +434,8 @@ const SFX = {
   ],
   wave: foleySet(['knock_1', 'knock_3', 'knock_5']),
 };
+/** Currently playing effects, so backgrounding can silence all audio. */
+const activeSfx = new Set();
 
 /**
  * Warm the clip files so the first flip does not wait on the network.
@@ -428,8 +466,11 @@ function playSfx(bank, opts) {
   audio.volume = opt.volume == null ? 0.55 : opt.volume;
   if (opt.rate) audio.playbackRate = opt.rate;
   const start = () => {
+    if (document.hidden) return;
+    activeSfx.add(audio);
+    audio.addEventListener('ended', function () { activeSfx.delete(audio); }, { once: true });
     const pending = audio.play();
-    if (pending && pending.catch) pending.catch(function () {});
+    if (pending && pending.catch) pending.catch(function () { activeSfx.delete(audio); });
   };
   if (opt.delay) window.setTimeout(start, opt.delay * 1000);
   else start();
@@ -668,6 +709,34 @@ function startMusic() {
   musicOn = true;
   const pending = musicTrack.play();
   if (pending && pending.catch) pending.catch(() => { musicOn = false; });
+}
+
+/**
+ * Pause every audio source while the page is not visible.
+ */
+function pauseBackgroundAudio() {
+  if (musicTrack) musicTrack.pause();
+  for (const audio of activeSfx) audio.pause();
+  activeSfx.clear();
+  if (audioCtx && audioCtx.state === 'running') audioCtx.suspend();
+}
+
+/**
+ * Continue the music after returning to an already-started game.
+ */
+function resumeForegroundAudio() {
+  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  if (!musicOn || !musicTrack || !musicTrack.paused) return;
+  const pending = musicTrack.play();
+  if (pending && pending.catch) pending.catch(function () {});
+}
+
+/**
+ * Keep game audio aligned with browser/app visibility.
+ */
+function onVisibilityChange() {
+  if (document.hidden) pauseBackgroundAudio();
+  else resumeForegroundAudio();
 }
 
 /**
@@ -983,6 +1052,8 @@ function onKeyUp(e) {
 function resetJoystick(pointerId) {
   if (pointerId != null && joystick.pointerId !== pointerId) return;
   joystick.pointerId = null;
+  joystick.x = 0;
+  joystick.y = 0;
   mobileKeys.left = false;
   mobileKeys.right = false;
   mobileKeys.up = false;
@@ -1007,9 +1078,11 @@ function updateJoystick(e) {
   }
   const nx = dx / max;
   const ny = dy / max;
-  const dead = 0.24;
-  mobileKeys.left = nx < -dead;
-  mobileKeys.right = nx > dead;
+  const dead = 0.3;
+  joystick.x = Math.abs(nx) > dead ? Math.sign(nx) * (Math.abs(nx) - dead) / (1 - dead) : 0;
+  joystick.y = Math.abs(ny) > dead ? Math.sign(ny) * (Math.abs(ny) - dead) / (1 - dead) : 0;
+  mobileKeys.left = joystick.x < 0;
+  mobileKeys.right = joystick.x > 0;
   mobileKeys.up = ny < -dead;
   mobileKeys.down = ny > dead;
   joystickKnob.style.transform = 'translate(calc(-50% + ' + dx + 'px), calc(-50% + ' + dy + 'px))';
@@ -1262,12 +1335,11 @@ function turnToward(current, target, dt, speed) {
 function updatePlayer(dt) {
   const p = game.player;
   const turn = 3.6 * dt;
-  const left = keys.left || mobileKeys.left;
-  const right = keys.right || mobileKeys.right;
   const up = keys.up || mobileKeys.up;
   const down = keys.down || mobileKeys.down;
-  if (left) p.yaw += turn;
-  if (right) p.yaw -= turn;
+  if (keys.left) p.yaw += turn;
+  if (keys.right) p.yaw -= turn;
+  p.yaw -= joystick.x * 1.65 * dt;
   p.yaw = wrapAngle(p.yaw);
 
   let x = 0;
@@ -1284,7 +1356,7 @@ function updatePlayer(dt) {
   }
   const len = Math.hypot(x, y);
   p.walking = len > 0.001;
-  p.moving = p.walking || left || right;
+  p.moving = p.walking || keys.left || keys.right || Math.abs(joystick.x) > 0.001;
   if (len > 0.001) {
     const nx = x / len;
     const ny = y / len;
@@ -3876,6 +3948,11 @@ updateCamera();
 window.addEventListener('resize', fitCanvas);
 window.addEventListener('keydown', onKeyDown);
 window.addEventListener('keyup', onKeyUp);
+document.addEventListener('visibilitychange', onVisibilityChange);
+window.addEventListener('pagehide', pauseBackgroundAudio);
+window.addEventListener('pageshow', function () {
+  if (!document.hidden) resumeForegroundAudio();
+});
 window.addEventListener('blur', function () {
   keys.left = false;
   keys.right = false;
