@@ -1,12 +1,15 @@
-Battle Theme I
-By HydroGene
+(Blood) Stained Glass
+By FoxSynergy
 
 Source:
-https://opengameart.org/content/16-bit-battle-theme-i
+https://opengameart.org/content/blood-stained-glass
 
 License:
-Creative Commons Zero v1.0 Universal (CC0)
-https://creativecommons.org/publicdomain/zero/1.0/
+Creative Commons Attribution 3.0 Unported (CC BY 3.0)
+https://creativecommons.org/licenses/by/3.0/
 
-The included battle-theme-loop.ogg is the seamless loop supplied in the
-original Battle Theme I archive.
+Attribution:
+"(Blood) Stained Glass" by FoxSynergy
+
+The included blood-stained-glass.mp3 is the original file supplied by
+the author on OpenGameArt.

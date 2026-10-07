@@ -42,7 +42,7 @@
   }
   #view {
     background: #6e3028;
-    cursor: pointer;
+    cursor: default;
     touch-action: none;
   }
   #view:focus {
@@ -61,14 +61,102 @@
     text-align: center;
     color: #f0e2cc;
   }
+  .mobile-controls,
+  .mobile-hint {
+    display: none;
+  }
+  @media (hover: none) and (pointer: coarse) {
+    .mobile-controls {
+      position: absolute;
+      inset: 0;
+      z-index: 3;
+      display: block;
+      pointer-events: none;
+    }
+    .joystick,
+    .flip-control {
+      position: absolute;
+      bottom: clamp(16px, 4vw, 30px);
+      pointer-events: auto;
+      touch-action: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .joystick {
+      left: clamp(16px, 4vw, 30px);
+      width: clamp(88px, 20vw, 118px);
+      aspect-ratio: 1;
+      border: 3px solid rgba(255, 235, 177, 0.72);
+      border-radius: 50%;
+      background: rgba(35, 18, 12, 0.7);
+      box-shadow: 0 0 22px rgba(226, 180, 74, 0.32), inset 0 0 24px rgba(0, 0, 0, 0.42);
+    }
+    .joystick::before,
+    .joystick::after {
+      content: "";
+      position: absolute;
+      background: rgba(255, 235, 177, 0.2);
+    }
+    .joystick::before {
+      left: 50%;
+      top: 13%;
+      width: 1px;
+      height: 74%;
+    }
+    .joystick::after {
+      left: 13%;
+      top: 50%;
+      width: 74%;
+      height: 1px;
+    }
+    .joystick-knob {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 44%;
+      aspect-ratio: 1;
+      border-radius: 50%;
+      background: linear-gradient(#f7db80, #c9952c);
+      border: 2px solid #fff1bd;
+      box-shadow: 0 5px 14px rgba(0, 0, 0, 0.5), 0 0 16px rgba(255, 216, 89, 0.45);
+      transform: translate(-50%, -50%);
+    }
+    .flip-control {
+      right: clamp(16px, 4vw, 30px);
+      width: clamp(88px, 20vw, 112px);
+      aspect-ratio: 1;
+      border: 3px solid #fff1bd;
+      border-radius: 50%;
+      background: linear-gradient(#efc85c, #bd7525);
+      color: #2b160e;
+      box-shadow: 0 7px 0 #714018, 0 0 24px rgba(255, 211, 78, 0.44);
+      font: 800 clamp(16px, 4vw, 22px) "Avenir Next", Avenir, sans-serif;
+      letter-spacing: 0.08em;
+    }
+    .flip-control:active {
+      transform: translateY(5px);
+      box-shadow: 0 2px 0 #714018, 0 0 28px rgba(255, 222, 101, 0.65);
+    }
+    .desktop-hint {
+      display: none;
+    }
+    .mobile-hint {
+      display: inline;
+    }
+  }
 </style>
 </head>
 <body>
 <div class="stage">
   <canvas id="view" width="960" height="600" tabindex="0" aria-label="Untitled Messiah Game. Flip every table before time runs out."></canvas>
   <canvas id="hud" width="960" height="600"></canvas>
+  <div class="mobile-controls" aria-label="Mobile game controls">
+    <div id="joystick" class="joystick" role="group" aria-label="Movement joystick">
+      <div id="joystickKnob" class="joystick-knob"></div>
+    </div>
+    <button id="flipControl" class="flip-control" type="button" aria-label="Flip nearby table">FLIP</button>
+  </div>
 </div>
-<p class="hint">WASD / arrows to waddle · Space or click a table to flip it</p>
+<p class="hint"><span class="desktop-hint">WASD / arrows to waddle · Space or E to flip</span><span class="mobile-hint">Drag the stick to waddle · FLIP a nearby table</span></p>
 <script>
 /** Logical width of the court, in pixels. */
 const W = 960;
@@ -94,10 +182,6 @@ const BOOST_SPEED = 425;
 const SPEED_FLASH_TIME = 1.8;
 /** Keyboard flip range from the player, in pixels. */
 const KEY_RANGE = 78;
-/** Pointer flip range from the click, in pixels. */
-const POINTER_RANGE = 86;
-/** Pointer must be farther than this to drag-walk. */
-const DRAG_DEAD = 18;
 /** Minimum distance between table anchors. */
 const SEP = 110;
 /** Preferred distance from the player when spawning a table. */
@@ -159,10 +243,14 @@ const view = document.getElementById('view');
 const canvas = view;
 const ui = document.getElementById('hud');
 const ctx = ui.getContext('2d');
+const joystickElement = document.getElementById('joystick');
+const joystickKnob = document.getElementById('joystickKnob');
+const flipControl = document.getElementById('flipControl');
 let gl = null;
 
 const keys = { left: false, right: false, up: false, down: false };
-const pointer = { down: false, x: 0, y: 0 };
+const mobileKeys = { left: false, right: false, up: false, down: false };
+const joystick = { pointerId: null };
 
 /**
  * Load one local SVG from the Lucide icon pack.
@@ -572,10 +660,10 @@ function startMusic() {
   unlockAudio();
   if (musicOn) return;
   if (!musicTrack) {
-    musicTrack = new Audio('sounds/music/battle-theme-loop.ogg');
+    musicTrack = new Audio('sounds/music/blood-stained-glass.mp3');
     musicTrack.preload = 'auto';
     musicTrack.loop = true;
-    musicTrack.volume = 0.32;
+    musicTrack.volume = 0.4;
   }
   musicOn = true;
   const pending = musicTrack.play();
@@ -803,7 +891,6 @@ function startRun() {
   game.particles = [];
   game.bubbles = [];
   game.timeBursts = [];
-  pointer.down = false;
   spawnWave(1);
   playSfx('wave', { volume: 0.42, rate: 1 });
 }
@@ -813,7 +900,6 @@ function startRun() {
  */
 function endRun() {
   game.mode = 'over';
-  pointer.down = false;
   playSfx('bell', { volume: 0.42, rate: 1.04 });
   if (game.score > game.best) {
     game.best = game.score;
@@ -891,81 +977,67 @@ function onKeyUp(e) {
 }
 
 /**
- * Logical 960×600 pixel under a pointer event.
- * @param {PointerEvent} e
- * @returns {{x:number,y:number}}
+ * Reset the mobile joystick and release all virtual movement keys.
+ * @param {number} [pointerId]
  */
-function screenPoint(e) {
-  const rect = view.getBoundingClientRect();
-  const width = rect.width || W;
-  const height = rect.height || H;
-  return {
-    x: ((e.clientX - rect.left) / width) * W,
-    y: ((e.clientY - rect.top) / height) * H,
-  };
+function resetJoystick(pointerId) {
+  if (pointerId != null && joystick.pointerId !== pointerId) return;
+  joystick.pointerId = null;
+  mobileKeys.left = false;
+  mobileKeys.right = false;
+  mobileKeys.up = false;
+  mobileKeys.down = false;
+  joystickKnob.style.transform = 'translate(-50%, -50%)';
 }
 
 /**
- * Convert a pointer event into a point on the floor.
- * Screen position is unprojected through the 3D camera.
+ * Turn joystick displacement into the four movement keys.
  * @param {PointerEvent} e
- * @returns {{x:number,y:number}}
  */
-function canvasPoint(e) {
-  const screen = screenPoint(e);
-  if (!cam) return screen;
-  return floorAt(screen.x, screen.y);
+function updateJoystick(e) {
+  if (e.pointerId !== joystick.pointerId) return;
+  const rect = joystickElement.getBoundingClientRect();
+  const max = rect.width * 0.29;
+  let dx = e.clientX - (rect.left + rect.width / 2);
+  let dy = e.clientY - (rect.top + rect.height / 2);
+  const distance = Math.hypot(dx, dy);
+  if (distance > max) {
+    dx = dx / distance * max;
+    dy = dy / distance * max;
+  }
+  const nx = dx / max;
+  const ny = dy / max;
+  const dead = 0.24;
+  mobileKeys.left = nx < -dead;
+  mobileKeys.right = nx > dead;
+  mobileKeys.up = ny < -dead;
+  mobileKeys.down = ny > dead;
+  joystickKnob.style.transform = 'translate(calc(-50% + ' + dx + 'px), calc(-50% + ' + dy + 'px))';
 }
 
 /**
- * Start a run, or flip the table under the pointer and begin a drag.
+ * Capture a mobile joystick drag and start the run if needed.
  * @param {PointerEvent} e
  */
-function onPointerDown(e) {
-  if (e.cancelable) e.preventDefault();
-  const screen = screenPoint(e);
-  const point = cam ? floorAt(screen.x, screen.y) : screen;
-  pointer.x = point.x;
-  pointer.y = point.y;
-  canvas.focus({ preventScroll: true });
+function onJoystickDown(e) {
+  e.preventDefault();
+  if (game.mode !== 'play') startRun();
+  joystick.pointerId = e.pointerId;
+  joystickElement.setPointerCapture(e.pointerId);
+  updateJoystick(e);
+}
+
+/**
+ * Flip the closest reachable table, or start from an overlay.
+ * @param {PointerEvent} e
+ */
+function onMobileFlip(e) {
+  e.preventDefault();
   if (game.mode !== 'play') {
     startRun();
     return;
   }
-  pointer.down = true;
-  try {
-    canvas.setPointerCapture(e.pointerId);
-  } catch (err) {
-    /* capture can fail if the pointer is already gone */
-  }
-  if (game.banner > FLIP_LOCK) return;
-  const aimed = tableAlongRay(screen.x, screen.y);
-  if (aimed && dist(game.player.x, game.player.y, aimed.x, aimed.y) <= KEY_RANGE) {
-    flipTable(aimed);
-    return;
-  }
-  const tapped = nearestUpright(point.x, point.y, POINTER_RANGE);
-  if (tapped && dist(game.player.x, game.player.y, tapped.x, tapped.y) <= KEY_RANGE) {
-    flipTable(tapped);
-  }
-}
-
-/**
- * Track a held pointer so drag-walking follows it.
- * @param {PointerEvent} e
- */
-function onPointerMove(e) {
-  if (!pointer.down) return;
-  const point = canvasPoint(e);
-  pointer.x = point.x;
-  pointer.y = point.y;
-}
-
-/**
- * Stop drag-walking when the pointer is released.
- */
-function onPointerUp() {
-  pointer.down = false;
+  tryFlipAt(game.player.x, game.player.y, KEY_RANGE);
 }
 
 /**
@@ -1185,49 +1257,40 @@ function turnToward(current, target, dt, speed) {
 
 /**
  * Turn with left and right, and walk forward or back along that facing.
- * A held pointer still pulls toward the floor point under the cursor.
  * @param {number} dt
  */
 function updatePlayer(dt) {
   const p = game.player;
   const turn = 3.6 * dt;
-  if (keys.left) p.yaw += turn;
-  if (keys.right) p.yaw -= turn;
+  const left = keys.left || mobileKeys.left;
+  const right = keys.right || mobileKeys.right;
+  const up = keys.up || mobileKeys.up;
+  const down = keys.down || mobileKeys.down;
+  if (left) p.yaw += turn;
+  if (right) p.yaw -= turn;
   p.yaw = wrapAngle(p.yaw);
 
   let x = 0;
   let y = 0;
   const fx = Math.sin(p.yaw);
   const fy = Math.cos(p.yaw);
-  if (keys.up) {
+  if (up) {
     x += fx;
     y += fy;
   }
-  if (keys.down) {
+  if (down) {
     x -= fx;
     y -= fy;
   }
-  let steering = false;
-  if (pointer.down) {
-    const dx = pointer.x - p.x;
-    const dy = pointer.y - p.y;
-    const d = Math.hypot(dx, dy);
-    if (d > DRAG_DEAD) {
-      x += dx / d;
-      y += dy / d;
-      steering = true;
-    }
-  }
   const len = Math.hypot(x, y);
   p.walking = len > 0.001;
-  p.moving = p.walking || keys.left || keys.right;
+  p.moving = p.walking || left || right;
   if (len > 0.001) {
     const nx = x / len;
     const ny = y / len;
     const speed = p.sneakers ? BOOST_SPEED : SPEED;
     p.x += nx * speed * dt;
     p.y += ny * speed * dt;
-    if (steering) p.yaw = turnToward(p.yaw, Math.atan2(nx, ny), dt, 9);
   }
   const stood = separateFromTables(p.x, p.y, BODY);
   p.x = clamp(stood.x, FLOOR.l, FLOOR.r);
@@ -2693,74 +2756,6 @@ function updateCamera() {
 }
 
 /**
- * Direction from the camera through a logical screen pixel. Not normalized.
- * @param {number} sx
- * @param {number} sy
- * @returns {{dx:number,dy:number,dz:number}}
- */
-function aimRay(sx, sy) {
-  const ndcX = (sx / W) * 2 - 1;
-  const ndcY = 1 - (sy / H) * 2;
-  const spread = Math.tan(CAM_FOV / 2);
-  const aspect = W / H;
-  return {
-    dx: cam.fx + cam.rx * ndcX * spread * aspect + cam.ux * ndcY * spread,
-    dy: cam.fy + cam.ry * ndcX * spread * aspect + cam.uy * ndcY * spread,
-    dz: cam.fz + cam.rz * ndcX * spread * aspect + cam.uz * ndcY * spread,
-  };
-}
-
-/**
- * Intersect the pointer ray with the floor.
- * @param {number} sx
- * @param {number} sy
- * @returns {{x:number,y:number}}
- */
-function floorAt(sx, sy) {
-  const ray = aimRay(sx, sy);
-  if (ray.dy >= -0.0001) {
-    const p = game.player;
-    return {
-      x: p.x + Math.sin(p.yaw) * 280,
-      y: p.y + Math.cos(p.yaw) * 280,
-    };
-  }
-  const t = (GROUND - cam.ey) / ray.dy;
-  return { x: cam.ex + ray.dx * t, y: cam.ez + ray.dz * t };
-}
-
-/**
- * Upright table the click ray actually passes through.
- * The floor point under a tabletop is far ahead in this camera, so clicks use the ray.
- * @param {number} sx
- * @param {number} sy
- * @returns {object | null}
- */
-function tableAlongRay(sx, sy) {
-  if (!cam) return null;
-  const ray = aimRay(sx, sy);
-  const dd = ray.dx * ray.dx + ray.dy * ray.dy + ray.dz * ray.dz;
-  let best = null;
-  let bestT = Infinity;
-  for (let i = 0; i < game.tables.length; i++) {
-    const table = game.tables[i];
-    const radius = Math.max(56, table.w * 0.7);
-    const ox = cam.ex - table.x;
-    const oy = cam.ey - (GROUND + 18 + (table.h || 0));
-    const oz = cam.ez - table.y;
-    const b = ox * ray.dx + oy * ray.dy + oz * ray.dz;
-    const c = ox * ox + oy * oy + oz * oz - radius * radius;
-    const disc = b * b - dd * c;
-    if (disc < 0) continue;
-    const t = (-b - Math.sqrt(disc)) / dd;
-    if (t < 0 || t >= bestT) continue;
-    bestT = t;
-    best = table;
-  }
-  return best;
-}
-
-/**
  * Project a world point to logical screen pixels.
  * @param {number} x
  * @param {number} y
@@ -3886,12 +3881,14 @@ window.addEventListener('blur', function () {
   keys.right = false;
   keys.up = false;
   keys.down = false;
-  pointer.down = false;
+  resetJoystick();
 });
-canvas.addEventListener('pointerdown', onPointerDown, { passive: false });
-window.addEventListener('pointermove', onPointerMove);
-window.addEventListener('pointerup', onPointerUp);
-window.addEventListener('pointercancel', onPointerUp);
+joystickElement.addEventListener('pointerdown', onJoystickDown, { passive: false });
+joystickElement.addEventListener('pointermove', updateJoystick, { passive: false });
+joystickElement.addEventListener('pointerup', function (e) { resetJoystick(e.pointerId); });
+joystickElement.addEventListener('pointercancel', function (e) { resetJoystick(e.pointerId); });
+joystickElement.addEventListener('lostpointercapture', function (e) { resetJoystick(e.pointerId); });
+flipControl.addEventListener('pointerdown', onMobileFlip, { passive: false });
 canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
 canvas.addEventListener('dragstart', function (e) { e.preventDefault(); });
 last = performance.now();
