@@ -1046,6 +1046,23 @@ function onKeyUp(e) {
 }
 
 /**
+ * Start from the visible title or replay button without enabling gameplay gestures.
+ * @param {PointerEvent} e
+ */
+function onCanvasStart(e) {
+  if (game.mode === 'play') return;
+  const rect = view.getBoundingClientRect();
+  const x = ((e.clientX - rect.left) / (rect.width || W)) * W;
+  const y = ((e.clientY - rect.top) / (rect.height || H)) * H;
+  const titleHit = game.mode === 'title' && x >= 338 && x <= 622 && y >= 382 && y <= 434;
+  const replayHit = game.mode === 'over' && x >= 358 && x <= 602 && y >= 300 && y <= 336;
+  if (!titleHit && !replayHit) return;
+  if (e.cancelable) e.preventDefault();
+  canvas.focus({ preventScroll: true });
+  startRun();
+}
+
+/**
  * Reset the mobile joystick and release all virtual movement keys.
  * @param {number} [pointerId]
  */
@@ -3966,6 +3983,7 @@ joystickElement.addEventListener('pointerup', function (e) { resetJoystick(e.poi
 joystickElement.addEventListener('pointercancel', function (e) { resetJoystick(e.pointerId); });
 joystickElement.addEventListener('lostpointercapture', function (e) { resetJoystick(e.pointerId); });
 flipControl.addEventListener('pointerdown', onMobileFlip, { passive: false });
+canvas.addEventListener('pointerdown', onCanvasStart, { passive: false });
 canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
 canvas.addEventListener('dragstart', function (e) { e.preventDefault(); });
 last = performance.now();
